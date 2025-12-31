@@ -180,7 +180,7 @@ class MultiModalityConfig(PretrainedConfig):
             self.language_config = LlamaConfig(**language_config)
 
 
-class MultiModalityPreTrainedModel(PreTrainedModel):
+class MultiModalityPreTrainedModel(PreTrainedModel): # transformers의 PreTrainedModel을 상속
     config_class = MultiModalityConfig
     base_model_prefix = "multi_modality"
     _no_split_modules = []

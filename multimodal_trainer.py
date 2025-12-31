@@ -12,12 +12,12 @@ from janus.utils.io import load_pil_images
 
 class EnhancedMultiModalModel(MultiModalityCausalLM):
     """
-    增强版多模态因果语言模型，支持自定义前向传播逻辑。
+    향상된 멀티모달 인과 언어 모델로, 사용자 정의 순전파(forward) 로직을 지원합니다.
     """
 
     def forward(
         self,
-        input_ids=None,
+        input_ids:torch.LongTensor,
         attention_mask=None,
         pixel_values=None,
         image_token_masks=None,
@@ -25,7 +25,7 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
         **kwargs,
     ):
         """
-        自定义前向传播方法，支持图像和文本的联合处理。
+        사용자 정의 순전파(forward) 메서드로, 이미지와 텍스트의 공동 처리를 지원합니다.
         """
         if pixel_values is not None and image_token_masks is not None:
             inputs_embeds = self._process_multimodal_inputs(
@@ -52,13 +52,13 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
         pixel_values: torch.FloatTensor,
         image_token_masks: torch.BoolTensor,
     ) -> torch.Tensor:
-        bs, n = pixel_values.shape[0:2]
-        images = pixel_values.view(bs * n, *pixel_values.shape[2:])
-        image_features = self.vision_model(images)
-        aligned_features = self.aligner(image_features)
+        bs, n = pixel_values.shape[0:2] # (bs, n, 3, h, w)
+        images = pixel_values.view(bs * n, *pixel_values.shape[2:]) # (bs * n, 3, h, w)
+        image_features = self.vision_model(images) 
+        aligned_features = self.aligner(image_features) # (bs * n, n_image_tokens, D)
 
-        aligned_features = aligned_features.view(bs, n, *aligned_features.shape[1:])
-        aligned_features = aligned_features.flatten(1, 2)
+        aligned_features = aligned_features.view(bs, n, *aligned_features.shape[1:]) # (bs, n, n_image_tokens, D)
+        aligned_features = aligned_features.flatten(1, 2) # (bs, n * n_image_tokens, D)
 
         text_embeds = self.language_model.get_input_embeddings()(input_ids)
 
@@ -77,19 +77,19 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
 
 
 class EnhancedMultiModalTrainer:
-    def __init__(self, 
-                 data_dir: str, 
-                 pretrained_model_path: str, 
-                 output_dir: str, 
-                 batch_size: int = 1, 
-                 max_epochs: int = 10, 
-                 lr: float = 3e-4, 
-                 user_question: str = "这张照片讲了什么？",
+    def __init__(self,
+                 data_dir: str,
+                 pretrained_model_path: str,
+                 output_dir: str,
+                 batch_size: int = 1,
+                 max_epochs: int = 10,
+                 lr: float = 3e-4,
+                 user_question: str = "这张照片讲了什么？", # “이 사진은 무엇을 말하고 있나요?”
                  optimizer_name: str = "AdamW",
-                 lora_config: dict = None,
-                 training_args: dict = None):
+                 lora_config: dict|None = None,
+                 training_args: dict|None = None):
         """
-        初始化增强版多模态训练器。
+        향상된 멀티모달 트레이너 초기화.
         """
         self.data_dir = data_dir
         self.pretrained_model_path = pretrained_model_path
@@ -119,15 +119,15 @@ class EnhancedMultiModalTrainer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def _load_data(self) -> List[Tuple[str, str]]:
-        """加载图像和文本配对数据。"""
+        """이미지와 텍스트 쌍 데이터 로드."""
         pairs = []
-        img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        img_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp'}
         for root, _, files in os.walk(self.data_dir):
             for fname in files:
                 base, ext = os.path.splitext(fname)
                 full_path = os.path.join(root, fname)
-                if ext.lower() in img_exts:
-                    txt_path = os.path.join(root, f"{base}.txt")
+                if ext.lower() in img_exts: # 만약 이미지 파일이라면
+                    txt_path = os.path.join(root, f"{base}.txt") # 동일한 이름의 .txt 파일 찾기
                     if os.path.exists(txt_path):
                         with open(txt_path, "r", encoding="utf-8") as f:
                             text_content = f.read().strip()
@@ -138,7 +138,7 @@ class EnhancedMultiModalTrainer:
         return pairs
 
     def _prepare_model(self):
-        """加载预训练模型并配置 LoRA 微调。"""
+        """사전 훈련된 모델 로드 및 LoRA 미세 조정 구성."""
         print(f"Loading pretrained model from {self.pretrained_model_path}")
         self.processor = VLChatProcessor.from_pretrained(
             self.pretrained_model_path,
@@ -150,7 +150,7 @@ class EnhancedMultiModalTrainer:
             device_map="auto"
         )
 
-        # 配置 LoRA
+        # LoRA 구성
         lora_config = LoraConfig(**self.lora_config)
         self.model = get_peft_model(self.model, lora_config)
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -158,7 +158,7 @@ class EnhancedMultiModalTrainer:
         print(f"Trainable params: {trainable_params} / {total_params}")
 
     def _prepare_optimizer_and_scheduler(self, dataset_size: int):
-        """准备优化器和学习率调度器。"""
+        """옵티마이저 및 학습률 스케줄러 준비."""
         if self.optimizer_name == "AdamW":
             optimizer = AdamW(self.model.parameters(), lr=self.lr, weight_decay=0.01)
         elif self.optimizer_name == "SGD":
@@ -183,8 +183,8 @@ class EnhancedMultiModalTrainer:
         self.lr_scheduler = lr_scheduler
 
     def _collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """自定义数据整理函数。"""
-        conversations = []
+        """사용자 정의 데이터 수집 함수."""
+        conversations = [] # List[Dict[str, Any]]
         for item in batch:
             conversations.extend(self._generate_conversation(item["image_path"], item["text"]))
         
@@ -195,42 +195,32 @@ class EnhancedMultiModalTrainer:
             return_tensors="pt",
             force_batchify=True,
         )
-    
-        # 获取 input_ids 和对应的 EOS token ID
-        input_ids = encoded["input_ids"]
-        eos_token_id = self.processor.tokenizer.eos_token_id
-    
-        # 创建 labels，使其为 input_ids 的下一个 token，并在末尾添加 EOS
-        labels = input_ids.clone()
-        labels[:, :-1] = input_ids[:, 1:]
-        labels[:, -1] = eos_token_id  # 确保最后一个 token 是 EOS
-    
-        encoded["labels"] = labels
-    
-        # 获取 <image_placeholder> 的 token ID，并创建 image_token_masks
+        encoded["labels"] = encoded["input_ids"].clone()
+
         image_placeholder_token_id = self.processor.tokenizer.convert_tokens_to_ids("<image_placeholder>")
+        input_ids = encoded["input_ids"]
         image_token_masks = (input_ids == image_placeholder_token_id)
-    
+
         if not image_token_masks.any():
             raise ValueError("No <image_placeholder> tokens found in the input!")
-    
+
         encoded["image_token_masks"] = image_token_masks
         return dict(encoded)
-    
+
     def _generate_conversation(self, image_path: str, assistant_text: str) -> List[Dict[str, Any]]:  
-        """生成对话模板。"""  
-        # 确保assistant_text以EOS token结尾  
+        """대화 템플릿 생성."""  
+        # assistant_text가 EOS 토큰으로 끝나는지 확인  
         eos_token = self.processor.tokenizer.eos_token  
         if not assistant_text.endswith(eos_token):  
             assistant_text = assistant_text + eos_token  
           
         return [  
-            {"role": "<|User|>", "content": f"<image_placeholder>\n{self.user_question}", "images": [image_path]},  
-            {"role": "<|Assistant|>", "content": assistant_text},  
+            {"role": "<|User|>", "content": f"<image_placeholder>\n{self.user_question}", "images": [image_path]},
+            {"role": "<|Assistant|>", "content": assistant_text},
         ]
-    
+
     def train(self):
-        """主训练流程。"""
+        """메인 훈련 프로세스."""
         pairs = self._load_data()
         dataset = [{"image_path": img, "text": txt} for img, txt in pairs]
 
@@ -242,11 +232,11 @@ class EnhancedMultiModalTrainer:
             num_train_epochs=self.max_epochs,
             per_device_train_batch_size=self.batch_size,
             learning_rate=self.lr,
-            **self.training_args,
+            **self.training_args, 
         )
 
         trainer = Trainer(
-            model=self.model,
+            model=self.model, 
             args=training_args,
             train_dataset=dataset,
             data_collator=self._collate_fn,

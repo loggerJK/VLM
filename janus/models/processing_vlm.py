@@ -395,7 +395,7 @@ class VLChatProcessor(ProcessorMixin):
             seq_len = len(prepare)
             n_image = len(prepare.num_image_tokens)
             # left-padding
-            batched_attention_mask[i, -seq_len:] = 1
+            batched_attention_mask[i, -seq_len:] = 1 # 000001111111
             batched_input_ids[i, -seq_len:] = torch.LongTensor(input_ids)
             batched_images_seq_mask[i, -seq_len:] = input_ids == self.image_id
 

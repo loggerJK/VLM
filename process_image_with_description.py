@@ -6,7 +6,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 
-#up主这里的是原生多模态模型的文件夹地址,记得填你自己的文件夹路径
+# 업로더의 원래 멀티모달 모델 폴더 주소입니다. 자신의 폴더 경로를 입력하세요.
 model_path = "/root/autodl-tmp/deepseek-janus-pro-lora/Janus-Pro-7B"
 config = AutoConfig.from_pretrained(model_path)
 language_config = config.language_config
@@ -15,7 +15,7 @@ vl_gpt = AutoModelForCausalLM.from_pretrained(
     model_path,
     language_config=language_config,
     trust_remote_code=True,
-    torch_dtype=torch.float16  # 使用 float16 避免 BFloat16 问题
+    torch_dtype=torch.float16  # BFloat16 문제를 방지하기 위해 float16 사용
 )
 if torch.cuda.is_available():
     vl_gpt = vl_gpt.cuda()
@@ -43,7 +43,7 @@ def multimodal_understanding(image, question, seed=42, top_p=0.95, temperature=0
     pil_images = [Image.fromarray(image)]
     prepare_inputs = vl_chat_processor(
         conversations=conversation, images=pil_images, force_batchify=True
-    ).to(cuda_device, dtype=torch.float16)  # 使用 float16
+    ).to(cuda_device, dtype=torch.float16)  # float16 사용
     
     inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
     
@@ -65,48 +65,48 @@ def multimodal_understanding(image, question, seed=42, top_p=0.95, temperature=0
 
 def generate_hash_name(filename):
     """
-    为文件生成哈希码名字。
+    파일에 대한 해시 코드 이름을 생성합니다.
     """
     hash_object = hashlib.md5(filename.encode())
     return hash_object.hexdigest()
 
 def convert_images_to_jpeg_and_rename(folder_path):
     """
-    将文件夹中的图片转换为 JPEG 格式，并重命名为哈希码名字，最后统一处理成从 1 开始的数字。
+    폴더 내의 이미지를 JPEG 형식으로 변환하고 해시 코드 이름으로 이름을 변경한 다음, 마지막으로 1부터 시작하는 숫자로 통일하여 처리합니다.
     
-    :param folder_path: 图片文件夹路径
-    :return: 返回新图片的文件路径列表
+    :param folder_path: 이미지 폴더 경로
+    :return: 새 이미지 파일 경로 목록 반환
     """
     temp_image_paths = []
     new_image_paths = []
-    count = 1  # 从 1 开始递增命名
+    count = 1  # 1부터 시작하여 이름 증가
 
-    # 遍历文件夹中的所有图片
+    # 폴더 내의 모든 이미지 순회
     for filename in os.listdir(folder_path):
         if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
             image_path = os.path.join(folder_path, filename)
             
-            # 打开图片并转换为 RGB 模式
+            # 이미지를 열고 RGB 모드로 변환
             with Image.open(image_path) as img:
                 img = img.convert("RGB")
                 
-                # 生成哈希码名字
+                # 해시 코드 이름 생성
                 hash_name = generate_hash_name(filename)
                 temp_filename = f"{hash_name}.jpeg"
                 temp_image_path = os.path.join(folder_path, temp_filename)
                 
-                # 保存为 JPEG 格式
+                # JPEG 형식으로 저장
                 img.save(temp_image_path, "JPEG")
                 
-                # 确保新文件已保存
+                # 새 파일이 저장되었는지 확인
                 if os.path.exists(temp_image_path):
                     temp_image_paths.append(temp_image_path)
-                    os.remove(image_path)  # 删除原始文件
+                    os.remove(image_path)  # 원본 파일 삭제
                     print(f"Converted {filename} -> {temp_filename}")
                 else:
                     print(f"Failed to save {temp_filename}, skipping deletion of {filename}")
     
-    # 重新命名文件为从 1 开始的数字
+    # 파일을 1부터 시작하는 숫자로 이름 변경
     for temp_image_path in sorted(temp_image_paths):
         new_filename = f"{count}.jpeg"
         new_image_path = os.path.join(folder_path, new_filename)
@@ -119,23 +119,23 @@ def convert_images_to_jpeg_and_rename(folder_path):
 
 def process_images_in_folder(folder_path, output_folder, question="Describe this picture. Please note that the person in this picture named Trump."):
     """
-    处理文件夹中的所有图片，并生成对应的识别结果。
+    폴더 내의 모든 이미지를 처리하고 해당 인식 결과를 생성합니다.
     
-    :param folder_path: 图片文件夹路径
-    :param output_folder: 输出结果文件夹路径
-    :param question: 对每张图片提出的问题
+    :param folder_path: 이미지 폴더 경로
+    :param output_folder: 결과 출력 폴더 경로
+    :param question: 각 이미지에 대한 질문
     """
-    # 确保输出文件夹存在
+    # 출력 폴더가 존재하는지 확인
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     
-    # 将图片转换为 JPEG 格式并重命名
+    # 이미지를 JPEG 형식으로 변환하고 이름 변경
     new_image_paths = convert_images_to_jpeg_and_rename(folder_path)
     
-    # 打印新图片路径列表
+    # 새 이미지 경로 목록 출력
     print("New image paths:", new_image_paths)
     
-    # 遍历新图片路径
+    # 새 이미지 경로 순회
     for image_path in new_image_paths:
         if not os.path.exists(image_path):
             print(f"File not found: {image_path}, skipping...")
@@ -144,24 +144,25 @@ def process_images_in_folder(folder_path, output_folder, question="Describe this
         filename = os.path.basename(image_path)
         output_txt_path = os.path.join(output_folder, f"{os.path.splitext(filename)[0]}.txt")
         
-        # 加载图片
+        # 이미지 로드
         image = np.array(Image.open(image_path).convert("RGB"))
         
-        # 调用多模态模型生成结果
+        # 멀티모달 모델을 호출하여 결과 생성
         result = multimodal_understanding(image, question)
         
-        # 修改结果：如果出现 "person"，在后面加上 "called Trump"
+        # 결과 수정: "person"이 나타나면 뒤에 "called Trump" 추가
         # result = result.replace("人", "叫做川普的人")
         
-        # 将结果保存到 txt 文件
+        # 결과를 txt 파일로 저장
         with open(output_txt_path, "w", encoding="utf-8") as f:
             f.write(result)
         
         print(f"Processed {filename} -> {output_txt_path}")
 
-# 设置输入文件夹和输出文件夹
-input_folder = "/root/autodl-tmp/deepseek-janus-pro-lora/trump"  # 替换为你的图片文件夹路径
-output_folder = "/root/autodl-tmp/deepseek-janus-pro-lora/trump"    # 替换为输出结果文件夹路径
+# 입력 폴더 및 출력 폴더 설정
+input_folder = "/root/autodl-tmp/deepseek-janus-pro-lora/trump"  # 이미지 폴더 경로로 교체
+output_folder = "/root/autodl-tmp/deepseek-janus-pro-lora/trump"    # 결과 출력 폴더 경로로 교체
 
-# 处理图片
+# 이미지 처리
+# 用中文描述这张照片,照片里的人的名字叫川普: “이 사진을 중국어로 설명해 주세요. 사진 속 인물의 이름은 트럼프입니다.”
 process_images_in_folder(input_folder, output_folder, question="用中文描述这张照片,照片里的人的名字叫川普")

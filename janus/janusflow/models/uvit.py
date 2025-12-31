@@ -76,14 +76,14 @@ class ImageHead(nn.Module):
         multiple_of = 256
         if decoder_cfg.in_channels % multiple_of != 0:
             warnings.warn(
-                f"建议把 vocab_size 设置为 {multiple_of} 的倍数, 否则会影响矩阵乘法的性能"
+                f"vocab_size를 {multiple_of}의 배수로 설정하는 것이 좋습니다. 그렇지 않으면 행렬 곱셈 성능에 영향을 미칩니다."
             )
 
         dtype = default_dtype = torch.get_default_dtype()
         if cfg.use_fp32_head_weight:
             dtype = torch.float32
             print(
-                "使用 fp32 head weight!!!! 与原来的 bf16 head weight 不兼容\n",
+                "fp32 head weight 사용!!!! 원래 bf16 head weight와 호환되지 않음\n",
                 end="",
                 flush=True,
             )
