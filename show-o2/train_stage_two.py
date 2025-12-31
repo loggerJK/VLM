@@ -43,7 +43,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 if torch.cuda.is_available():
     flex_attention = torch.compile(flex_attention)
 
-from datasets import create_imagetext_dataloader, MixedDataLoader, MMUDataset
+from datasets import create_imagetext_dataloader, MixedDataLoader, CountingDataset
 from utils import get_config, flatten_omega_conf, AverageMeter, denorm, denorm_vid, get_hyper_params, \
     path_to_llm_name, _freeze_params
 
@@ -78,7 +78,7 @@ def main():
 
     if "concat" in config.dataset.mixed_loader_mode:
         assert config.dataset.accumulation == 1, "No need to enable accumulation in mixed-dataloader!"
-        total_batch_size_per_gpu = bs_t2i + bs_mmu
+        total_batch_size_per_gpu = bs_t2i + bs_mmu 
         total_batch_size_without_accum = total_batch_size_per_gpu * accelerator.num_processes
         total_batch_size = total_batch_size_without_accum * config.training.gradient_accumulation_steps
     else:
@@ -361,8 +361,8 @@ def main():
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
     logger.info(f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
 
     # default: 1000 steps, linear noise schedule
     transport = create_transport(

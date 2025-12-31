@@ -130,6 +130,7 @@ if __name__ == '__main__':
             text_embeds_a = model.showo.model.embed_tokens(text_tokens_a)
             text_embeds_b = model.showo.model.embed_tokens(text_tokens_b)
 
+            print(f"config.model.showo.add_time_embeds : {config.model.showo.add_time_embeds}")
             if config.model.showo.add_time_embeds:
                 time_embeds = model.time_embed(torch.Tensor([[1.0]]).to(device), text_embeds_a.dtype)
                 if hasattr(model, 'time_embed_proj'):

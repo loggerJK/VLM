@@ -29,23 +29,23 @@ IGNORE_INDEX = -100
 class MMUDataset(data.Dataset):
     def __init__(
             self,
-            root: str,
-            text_tokenizer,
-            max_seq_len=1024,
-            source_max_len=512,
-            target_max_len=512,
-            image_size=768,
-            latent_height=24,
-            latent_width=24,
-            num_image_tokens=576,
-            cond_dropout_prob=0.1,
-            loader: Callable[[str], Any] = default_loader,
-            is_clip_encoder=False,
-            annotation_path="",
-            default_system_prompt="system\nYou are a helpful assistant.<|im_end|>",
-            stage='pre-training',
-            clip_processor=None,
-            showo_token_ids=None
+            root: str,  # 이미지 파일들이 위치한 최상위 루트 디렉토리 경로
+            text_tokenizer,  # 텍스트 처리를 위한 토크나이저 객체
+            max_seq_len=1024,  # 입력 시퀀스의 최대 길이 (텍스트 + 이미지 토큰)
+            source_max_len=512,  # 사용자 입력(질문)의 최대 길이
+            target_max_len=512,  # 어시스턴트 출력(답변)의 최대 길이
+            image_size=768,  # 입력 이미지의 해상도 (이 크기로 리사이즈됨)
+            latent_height=24,  # 이미지의 Latent feature 높이 (VAE 인코딩 후)
+            latent_width=24,  # 이미지의 Latent feature 너비
+            num_image_tokens=576,  # 이미지를 표현하는 토큰의 개수 (latent_height * latent_width)
+            cond_dropout_prob=0.1,  # 조건부 생성 시 컨디션을 드롭할 확률 (Classifier-Free Guidance 등에서 사용)
+            loader: Callable[[str], Any] = default_loader,  # 이미지 로딩 함수
+            is_clip_encoder=False,  # CLIP 인코더 사용 여부 (Normalization 통계값 결정에 영향)
+            annotation_path="",  # 데이터셋 어노테이션(JSON) 파일 경로
+            default_system_prompt="system\nYou are a helpful assistant.<|im_end|>",  # 기본 시스템 프롬프트
+            stage='pre-training',  # 학습 단계 ('pre-training', 'tuning' 등). 시스템 프롬프트 사용 여부 결정
+            clip_processor=None,  # CLIP 전처리 프로세서 (선택 사항)
+            showo_token_ids=None  # Show-o 모델 전용 스페셜 토큰 ID 딕셔너리
     ):
 
         self.text_tokenizer = text_tokenizer
@@ -198,8 +198,8 @@ class MMUDataset(data.Dataset):
                 source,
                 max_length=self.source_max_len,
                 truncation=True,
-                add_special_tokens=False
-            ).input_ids for source in sources]
+                add_special_tokens=False 
+            ).input_ids for source in sources] # type : List[List[int]]
 
             targets = [self.text_tokenizer(
                 target,

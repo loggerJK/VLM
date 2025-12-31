@@ -863,6 +863,7 @@ class SiglipEncoder(nn.Module):
         self.config = config
         self.layers = nn.ModuleList([SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
+        self._gradient_checkpointing_func = torch.utils.checkpoint.checkpoint
 
     # Ignore copy
     def forward(

@@ -60,7 +60,9 @@ class ShowoSemanticLayers(ModelMixin, ConfigMixin):
                              persistent=False)
 
     def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = True
+        if hasattr(module, "gradient_checkpointing"):
+            module.gradient_checkpointing = value
+            print(f"[Grad Checkpointing] {module.__class__.__name__} set to {value}")
 
     def reset_parameters(self):
 

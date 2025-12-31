@@ -108,7 +108,10 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
         self.reset_parameters()
 
     def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = True
+        self.gradient_checkpointing = value
+        if hasattr(module, "_set_gradient_checkpointing"):
+            module._set_gradient_checkpointing(value)
+            print(f"[Grad Checkpointing] In {self.__class__.__name__}, {module.__class__.__name__} set to {value}")
 
     def reset_parameters(self):
 
@@ -177,12 +180,12 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
         input_embeds = self.showo.model.embed_tokens(text_tokens)
         dtype = input_embeds.dtype
         if len(image_latents.shape) != 4:
-            b, c, T, h, w = image_latents.shape
+            b, c, T, h, w = image_latents.shape # 비디오?
         else:
-            b, c, h, w = image_latents.shape
+            b, c, h, w = image_latents.shape # 이미지?
 
         if T == 0:
-            image_embeds_und = self.image_embedder_und(image_latents.to(dtype))
+            image_embeds_und = self.image_embedder_und(image_latents.to(dtype)) # Patch Embedding
             image_embeds_gen = self.image_embedder_gen(image_latents.to(dtype))
         else:
             # (B, C, T, H, W) --> (BT, C, H, W)
@@ -213,7 +216,7 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
                 1,
             )
             image_embeds_und = self.und_trans(image_embeds_und)['last_hidden_state']
-        if T != 0:
+        if T != 0: # 비디오
             image_embeds_und = image_embeds_und.reshape(b, T, image_embeds_und.shape[1], -1)
             image_embeds_und = rearrange(image_embeds_und, 'b t l d -> b (t l) d')
 
@@ -232,7 +235,7 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
                     input_embeds[i, offset] = time_embeds_proj[i * modality_positions.size(1) + j]
                     # length - 1 because we add 1 to the num_image_tokens when add_time_embeds=True
                     # it's necessary to include :length-1, as sometimes we may skip some idle images when length=0
-                    input_embeds[i, offset + 1:offset + 1 + length - 1] = \
+                    input_embeds[i, offset+1 : offset+1 + length-1] = \
                         image_embeds[i * modality_positions.size(1) + j, :max(length - 1, 0)]
                 else:
                     input_embeds[i, offset:offset + length] = image_embeds[i * modality_positions.size(1) + j, :length]

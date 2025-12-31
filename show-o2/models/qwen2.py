@@ -842,6 +842,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if self.gradient_checkpointing and self.training:
+            print("[DEBUG] Gradient checkpointing is enabled.")
             if use_cache:
                 logger.warning_once(
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
