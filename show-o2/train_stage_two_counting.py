@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from _sqlite3 import adapt
 import os
 import json
 import logging
@@ -49,6 +50,10 @@ if torch.cuda.is_available():
 from datasets_ import CountingDataset
 from utils import get_config, flatten_omega_conf, AverageMeter, denorm, denorm_vid, get_hyper_params, \
     path_to_llm_name, _freeze_params
+    
+from peft import PeftModel
+from peft import get_peft_model, LoraConfig, TaskType
+
 
 from transport import Sampler, create_transport
 
@@ -135,7 +140,10 @@ def evaluate(model, dataset, vae_model, accelerator, weight_type, config, text_t
             time_embeds = unwrapped_model.time_embed_proj(time_embeds)
         
         # 3. Construct combined embeds
-        init_input_embeds = unwrapped_model.showo.model.embed_tokens(prompt_ids.unsqueeze(0))
+        if hasattr(unwrapped_model.showo.model, 'embed_tokens'):
+            init_input_embeds = unwrapped_model.showo.model.embed_tokens(prompt_ids.unsqueeze(0))
+        else :
+            init_input_embeds = unwrapped_model.showo.model.model.embed_tokens(prompt_ids.unsqueeze(0))
         
         # Use modality_positions to place image/time embeds
         offset, length = modality_positions[0, 0]
@@ -246,17 +254,17 @@ def main():
         set_verbosity_error()
 
     if accelerator.is_main_process:
-        resume_wandb_run = config.wandb.resume
-        run_id = config.wandb.get("run_id", None)
-        if run_id is None:
-            resume_wandb_run = False
-            run_id = wandb.util.generate_id()
-            config.wandb.run_id = run_id
+        # resume_wandb_run = config.wandb.resume
+        # run_id = config.wandb.get("run_id", None)
+        # if run_id is None:
+        #     resume_wandb_run = False
+        #     run_id = wandb.util.generate_id()
+        #     config.wandb.run_id = run_id
 
         wandb_init_kwargs = dict(
             name=os.getenv("WANDB_NAME", config.experiment.name),
-            id=os.getenv("WANDB_RUN_ID", run_id),
-            resume=resume_wandb_run,
+            id=os.getenv("WANDB_RUN_ID", None),
+            resume=os.getenv("WANDB_RESUME", config.wandb.get("resume", False)),
             entity=os.getenv("WANDB_ENTITY", config.wandb.get("entity", None)),
             config_exclude_keys=[],
         )
@@ -300,7 +308,48 @@ def main():
     else:
         model = Showo2Qwen2_5(**config.model.showo).to(accelerator.device).to(weight_type)
 
-    _freeze_params(model, config.model.showo.frozen_params)
+    if config.training.lora :
+        
+        
+        # Freeze all parameters first
+        for param in model.parameters():
+            param.requires_grad = False
+        if os.getenv("WANDB_RUN_ID") is not None :
+            checkpoint_path = os.getenv("RESUME_CHECKPOINT_PATH")
+            print(f"[INFO] Resuming LoRA from checkpoint: {checkpoint_path}")
+            model.showo = PeftModel.from_pretrained(model.showo, checkpoint_path, is_trainable=True,)
+            
+            
+            # lora_config = LoraConfig(
+            #     r=config.training.lora_r,
+            #     lora_alpha=config.training.lora_alpha,
+            #     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
+            #     task_type=TaskType.CAUSAL_LM,
+            #     lora_dropout=config.training.lora_dropout,
+            # )
+            # model.showo = get_peft_model(model.showo, lora_config)
+            # checkpoint_state_dict = torch.load(checkpoint_path, map_location="cpu")
+            # # 수동으로 파라미터 로드
+            # for name, param in model.showo.named_parameters():
+            #     if name in checkpoint_state_dict:
+            #         print(f"[INFO] Loading parameter: {name}")
+            #         param.data.copy_(checkpoint_state_dict[name].data)
+
+            
+        else:
+            print(f"[INFO] Training type : LoRA (rank: {config.training.lora_r}, alpha: {config.training.lora_alpha}, dropout: {config.training.lora_dropout})")
+            lora_config = LoraConfig(
+                r=config.training.lora_r,
+                lora_alpha=config.training.lora_alpha,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
+                task_type=TaskType.CAUSAL_LM,
+                lora_dropout=config.training.lora_dropout,
+            )
+            model.showo = get_peft_model(model.showo, lora_config)
+        print("[INFO] Trainable parameters after applying LoRA:")
+        model.showo.print_trainable_parameters()
+    else :
+        _freeze_params(model, config.model.showo.frozen_params)
 
     if config.model.get("gradient_checkpointing", False):
         print("[INFO] Enable gradient checkpointing")
@@ -392,14 +441,19 @@ def main():
     global_step = 0
     global_grad_step = 0
     first_epoch = 0
-    if config.experiment.resume_from_checkpoint:
-        dirs = [d for d in os.listdir(config.experiment.output_dir) if d.startswith("checkpoint")]
-        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-        path = os.path.join(config.experiment.output_dir, dirs[-1]) if dirs else None
-        if path:
-            global_step = int(os.path.basename(path).split("-")[1])
-            first_epoch = global_step // num_update_steps_per_epoch
-            model.load_state_dict(torch.load(f'{path}/unwrapped_model/pytorch_model.bin', map_location="cpu"))
+    
+    if os.getenv("RESUME_GLOBAL_STEP") is not None :
+        global_step = int(os.getenv("RESUME_GLOBAL_STEP"))
+        first_epoch = int(os.getenv("RESUME_EPOCH"))
+    
+    # if config.experiment.resume_from_checkpoint:
+    #     dirs = [d for d in os.listdir(config.experiment.output_dir) if d.startswith("checkpoint")]
+    #     dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+    #     path = os.path.join(config.experiment.output_dir, dirs[-1]) if dirs else None
+    #     if path:
+    #         global_step = int(os.path.basename(path).split("-")[1])
+    #         first_epoch = global_step // num_update_steps_per_epoch
+    #         model.load_state_dict(torch.load(f'{path}/unwrapped_model/pytorch_model.bin', map_location="cpu"))
 
     logger.info("***** Running training *****")
     logger.info(f"  Num epochs = {num_train_epochs}")
@@ -466,6 +520,7 @@ def main():
 
                 if (global_step) % config.experiment.eval_every == 0:
                     val_metrics = evaluate(model, dataset_val, vae_model, accelerator, weight_type, config, text_tokenizer)
+                    val_metrics['epoch'] = epoch
                     accelerator.log(val_metrics, step=global_step)
                     logger.info(f"Step: {global_step}, Val Acc: {val_metrics['val/accuracy']:.4f}")
                 
@@ -488,7 +543,12 @@ def save_checkpoint(model, config, accelerator, global_step, epoch=None):
     save_path = Path(config.experiment.output_dir) / f"checkpoint-{global_step}-epoch{epoch if epoch is not None else 'NA'}"
     if accelerator.is_main_process:
         unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(save_path / "unwrapped_model", save_function=accelerator.save, state_dict=accelerator.get_state_dict(model), safe_serialization=False)
+        if config.training.lora :
+            peft_model = unwrapped_model.showo
+            # unwrapped_model.showo.save_pretrained(save_path / "unwrapped_model", save_function=accelerator.save, state_dict=accelerator.get_state_dict(model), safe_serialization=False)
+            peft_model.save_pretrained(save_path / "lora_adapter",)
+        else :
+            unwrapped_model.save_pretrained(save_path / "unwrapped_model", save_function=accelerator.save, state_dict=accelerator.get_state_dict(model), safe_serialization=False)
 
 if __name__ == "__main__":
     main()

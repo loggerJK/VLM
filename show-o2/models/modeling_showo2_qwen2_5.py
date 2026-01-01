@@ -177,7 +177,11 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
             **kwargs,
     ):
         T = 0
-        input_embeds = self.showo.model.embed_tokens(text_tokens)
+        if hasattr(self.showo.model, 'embed_tokens'):
+            input_embeds = self.showo.model.embed_tokens(text_tokens)
+        else :
+            input_embeds = self.showo.model.model.embed_tokens(text_tokens)
+            
         dtype = input_embeds.dtype
         if len(image_latents.shape) != 4:
             b, c, T, h, w = image_latents.shape # 비디오?
@@ -568,7 +572,10 @@ class Showo2Qwen2_5(ModelMixin, ConfigMixin):
             idx_next = torch.multinomial(probs, num_samples=1)
             result.append(idx_next[0][0])
             # append sampled index to the running sequence and continue
-            idx_next_embeds = self.showo.model.embed_tokens(idx_next)
+            if hasattr(self.showo.model, 'embed_tokens'):
+                idx_next_embeds = self.showo.model.embed_tokens(idx_next)
+            else:
+                idx_next_embeds = self.showo.model.model.embed_tokens(idx_next)
             input_embeds = torch.cat([input_embeds, idx_next_embeds], dim=1).to(dtype)
 
             if eos_token is not None and idx_next.cpu() == eos_token:
