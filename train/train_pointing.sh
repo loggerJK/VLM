@@ -23,7 +23,7 @@ echo "Starting training verification..."
 echo "Output Directory: $output_dir"
 
 # Run with torchrun for 1 GPU
-torchrun --nproc_per_node=1 --master_port=29502 train/train_pointing.py \
+torchrun --nproc_per_node=1 --master_port=29504 train/train_pointing.py \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter 4 \
     --epochs 1 \

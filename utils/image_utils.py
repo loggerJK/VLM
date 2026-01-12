@@ -165,7 +165,8 @@ def encode_img_with_breaks_fixed(img, vqvae, vae_scale_factor=16):
     
     orig = img.convert("RGB")
     image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
-    x = image_processor.preprocess(orig).to(vqvae.device)
+    # Ensure x has the same dtype as vqvae (crucial for BF16/FP16)
+    x = image_processor.preprocess(orig).to(device=vqvae.device, dtype=vqvae.dtype)
     latents = vqvae.encode(x).latents
     B, C, H, W = latents.shape
 

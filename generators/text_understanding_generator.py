@@ -28,9 +28,9 @@ def generate_text_understanding(
     Args:
         model: Mask predictor
         prompt: Input prompt tensor (1, L)
-        steps: Sampling steps, less than or equal to gen_length
-        gen_length: Generated answer length
-        block_length: Block length, less than or equal to gen_length
+        steps: Sampling steps, less than or equal to gen_length, 전체 디노이싱 스텝
+        gen_length: Generated answer length, 전체 생성 길이
+        block_length: Block length, less than or equal to gen_length, 블록 단위 생성 길이
         temperature: Categorical distribution sampling temperature
         cfg_scale: Unsupervised classifier-free guidance scale
         remasking: Remasking strategy 'low_confidence' or 'random'

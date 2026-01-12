@@ -14,6 +14,8 @@ import datetime
 import json
 from pathlib import Path
 import wandb
+import re
+from tqdm import tqdm
 
 # HuggingFace & Diffusers
 from datasets import load_dataset
@@ -33,7 +35,9 @@ import xllmx.util.misc as misc
 from fairscale.nn.model_parallel import initialize as fs_init
 
 # Image Utils
-from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop
+from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line
+# Generation Utils
+from generators.text_understanding_generator import generate_text_understanding
 
 
 # ==============================================================================
@@ -78,6 +82,16 @@ def mask_codes(codes, sch="cosine", mask = False, editing = False):
         masked_codes[index] = MASK # Use MASK variable
     return masked_codes, labels
 
+def extract_number(text):
+    """Extract number from text pattern **number** or just number"""
+    match = re.search(r"\*\*(\d+)\*\*", text)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(\d+)", text)
+    if match:
+        return int(match.group(1))
+    return -1
+
 # ==============================================================================
 # 3. ItemProcessor (CPU Stage)
 # ==============================================================================
@@ -98,7 +112,7 @@ class ItemProcessorPointing(ItemProcessorBase):
         question = data_item.get('question', data_item.get('text', ''))
         answer = str(data_item.get('answer', data_item.get('label', '')))
 
-        # Image Preprocessing (Crop)
+        # Image Preprocessing (Crop) - Changed to 256 for stability
         crop_size_list = generate_crop_size_list((self.image_size // 32) ** 2, 32)
         image = var_center_crop(image, crop_size_list=crop_size_list)
 
@@ -218,6 +232,7 @@ class Solver(FinetuneSolverBase):
                 name=self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
                 config=vars(self.args)
             )
+        self.val_table = None
 
     def build_model(self):
         # 1. Call super build_model to get model and tokenizer
@@ -267,12 +282,8 @@ class Solver(FinetuneSolverBase):
         print("[Solver] Loading Hugging Face Datasets...")
         train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
-        try:
-            val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="train")
-            self.dataset_val = HFDatasetWrapper(val_ds, self._item_processor_func(self.tokenizer, self.args.max_seq_len))
-        except Exception as e:
-            print(f"Warning: Could not load validation set: {e}")
-            self.dataset_val = None
+        # Validation Dataset (Streaming) - Stored in self.val_ds_stream
+        self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
         return HFDatasetWrapper(train_ds, item_processor)
@@ -300,6 +311,123 @@ class Solver(FinetuneSolverBase):
         tokenizer.save_pretrained(save_path)
         print("[Solver] Starting point saved.")
 
+    def validate(self, epoch):
+        if self.global_rank != 0:
+            return
+
+        print(f"\n[Epoch {epoch}] Running Validation on CountBenchQA...")
+        self.model.eval()
+        
+        # Ensure VQ-VAE is loaded
+        if not hasattr(self, 'vqvae'):
+             # Reuse logic from train_one_epoch
+             if self.args.precision == "bf16":
+                dtype = torch.bfloat16
+             elif self.args.precision == "fp16":
+                raise ValueError("FP16 precision is not supported for VQ-VAE.")
+             else:
+                dtype = torch.float32
+             self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+             self.vqvae.eval()
+
+        correct = 0
+        total = 0
+        eval_limit = 100 
+        
+        eval_dataset = iter(self.val_ds_stream)
+        details_buffer = []
+        
+        # WandB Table
+        if self.val_table is None and self.args.use_wandb:
+            self.val_table = wandb.Table(columns=["Step", "Accuracy", "Details"])
+
+        with torch.no_grad():
+            count = 0
+            progress = tqdm(range(eval_limit), desc="Validation", unit="sample")
+            
+            for item in eval_dataset:
+                if count >= eval_limit:
+                    break
+                
+                image = item.get('image')
+                question = item.get('question')
+                if image is None: continue
+                gt_count = item.get('count')
+                if gt_count is None: continue
+                label = item.get('label', '<object>')
+
+                # Preprocess Image
+                crop_size_list = generate_crop_size_list((self.args.image_size // 32) ** 2, 32)
+                image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+                
+                # Encode Image
+                input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                img_token = add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE)
+                img_token = [BOI] + img_token + [EOI]
+                
+                # Prepare Prompt
+                question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
+                instruction = "<system>You are a multimodal model that can process both text and images. Answer the following question based on the provided images.</system>" + \
+                              "<user>" + question_prompt + "</user>"
+                
+                input_ids_raw = self.tokenizer(instruction)['input_ids']
+                
+                # Insert Image Token
+                input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                
+                # Prepare Generation Input
+                code_start = len(input_token) + 1
+                input_token = input_token + [BOA] + 20 * [MASK] # gen_length=20 for short answer
+                input_ids = torch.tensor(input_token, device="cuda").unsqueeze(0)
+                
+                # Generate
+                out_new = generate_text_understanding(
+                    self.model, input_ids,
+                    steps=16, # reduced steps for validation speed
+                    gen_length=20,
+                    block_length=20, # one block
+                    temperature=0.0,
+                    cfg_scale=0.0,
+                    remasking='low_confidence',
+                    code_start=code_start
+                )
+                
+                answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
+                pred_count = extract_number(answer)
+                
+                gt_count_val = int(gt_count)
+                pred_count_val = int(pred_count)
+                is_correct = bool(pred_count_val == gt_count_val)
+                
+                if is_correct:
+                    correct += 1
+                total += 1
+                count += 1
+                
+                res_str = f"[{count}] GT: {gt_count_val} | Pred: {pred_count_val} | Correct: {is_correct} | Ans: {answer}"
+                print(res_str)
+                details_buffer.append(res_str)
+                progress.update(1)
+            
+            progress.close()
+            
+        accuracy = correct / total if total > 0 else 0
+        print(f"Validation Accuracy: {accuracy:.4f} ({correct}/{total})")
+        
+        if self.args.use_wandb and self.val_table is not None:
+            all_details = "\n".join(details_buffer)
+            self.val_table.add_data(epoch, accuracy, all_details)
+            wandb.log({
+                "val/accuracy": accuracy, 
+                "epoch": epoch,
+                "val/predictions": self.val_table
+            })
+        
+        # Cleanup
+        del eval_dataset
+        torch.cuda.empty_cache()
+        self.model.train()
+
     def run(self):
         # Check for NaNs in parameters
         print("[Solver] Checking model parameters for NaNs...")
@@ -311,6 +439,20 @@ class Solver(FinetuneSolverBase):
                 print(f"[Solver] FATAL: Parameter {name} contains Infs!")
                 sys.exit(1)
         print("[Solver] Model parameters are clean.")
+        
+        # Ensure VQ-VAE is loaded for validation
+        if not hasattr(self, 'vqvae'):
+             if self.args.precision == "bf16":
+                dtype = torch.bfloat16
+             elif self.args.precision == "fp16":
+                raise ValueError("FP16 precision is not supported for VQ-VAE.")
+             else:
+                dtype = torch.float32
+             self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+             self.vqvae.eval()
+
+        # Initial Validation
+        self.validate(epoch=0)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()
@@ -346,6 +488,9 @@ class Solver(FinetuneSolverBase):
                 
                 if self.args.use_wandb:
                     wandb.log(log_stats)
+            
+            # Validation at end of epoch
+            self.validate(epoch=epoch + 1)
 
             self.start_iter = 0
             self.metric_logger_to_resume = None
@@ -434,7 +579,7 @@ class Solver(FinetuneSolverBase):
                 if len(final_input) > self.args.max_seq_len:
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
-                print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
+                # print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
                 # print(f"final_input : {len(final_input)}, final_label : {len(final_label)}")
 
                 input_ids_list.append(final_input)
