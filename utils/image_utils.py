@@ -150,7 +150,8 @@ def encode_img_with_breaks(img, vqvae, vae_scale_factor: int = 16):
     orig = img.convert("RGB")
     orig_resized = orig
     image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
-    x = image_processor.preprocess(orig_resized).to(vqvae.device)
+    # Ensure x has the same dtype as vqvae (crucial for BF16/FP16)
+    x = image_processor.preprocess(orig_resized).to(device=vqvae.device, dtype=vqvae.dtype)
     latents = vqvae.encode(x).latents
     latents_bsz, channels, lat_h, lat_w = latents.shape
     quantized = vqvae.quantize(latents)[2][2] + 126356
@@ -158,6 +159,24 @@ def encode_img_with_breaks(img, vqvae, vae_scale_factor: int = 16):
     img_token = add_break_line(quantized, lat_h, lat_w, new_number=126084)
     img_token = [126349] + img_token + [126350]
     return img_token
+
+def encode_img_with_breaks_fixed(img, vqvae, vae_scale_factor=16):
+    from diffusers.image_processor import VaeImageProcessor
+    
+    orig = img.convert("RGB")
+    image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
+    x = image_processor.preprocess(orig).to(vqvae.device)
+    latents = vqvae.encode(x).latents
+    B, C, H, W = latents.shape
+
+    # H*W 개의 순수 VQ grid index
+    quantized = vqvae.quantize(latents)[2][2] + 126356
+    quantized = quantized.reshape(B, H, W).flatten().tolist()
+
+    # newline 없이, start/end만 추가
+    img_token = [126349] + quantized + [126350]
+
+    return img_token, (H, W)
 
 @torch.no_grad()
 def encode_img_with_paint(
@@ -223,7 +242,8 @@ def encode_img_with_paint(
     # --- 2) VQ encoding using original image ---
     vae_scale_factor = 2 ** (len(vqvae.config.block_out_channels) - 1)
     image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
-    x = image_processor.preprocess(img).to(vqvae.device)  # 1 x 3 x H' x W'
+    # Ensure x has the same dtype as vqvae (crucial for BF16/FP16)
+    x = image_processor.preprocess(img).to(device=vqvae.device, dtype=vqvae.dtype)  # 1 x 3 x H' x W'
     latents = vqvae.encode(x).latents                     # 1 x C x h x w
     _, _, lat_h, lat_w = latents.shape
 

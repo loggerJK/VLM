@@ -51,9 +51,23 @@ class LLaDAForMultiModalGeneration(LLaDAModelLM):
         labels = [label + [-100] * (max_tokens - len(label)) for label in labels] # padding -100 to right --> max length
         labels = torch.tensor(labels, dtype=torch.int64, device=self.device)
         logits = output.logits
+        
+        if not torch.isfinite(logits).all():
+            print(f"[Wrapper] Logits NOT finite. min={logits.min().item()}, max={logits.max().item()}", flush=True)
+        
         loss = F.cross_entropy(logits.contiguous().view(-1, logits.shape[-1]), labels.contiguous().view(-1), ignore_index=-100,)
+        
+        if not torch.isfinite(loss):
+            print(f"[Wrapper] Loss is NOT finite: {loss.item()}", flush=True)
+            # Check if all labels are -100
+            valid_labels = (labels != -100).sum().item()
+            print(f"[Wrapper] Valid labels count: {valid_labels}", flush=True)
+
         return loss
     
     def get_fsdp_wrap_module_list(self) -> List:
         modules = [*list(self.model.transformer.blocks), self.model.transformer.ff_out]
         return modules
+
+    def get_checkpointing_wrap_module_list(self) -> List:
+        return list(self.model.transformer.blocks)

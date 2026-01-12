@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
+import random
 from abc import abstractmethod
 from collections import defaultdict
 from functools import partial
@@ -1322,6 +1323,9 @@ class LLaDAModel(nn.Module):
                 # `F.scaled_dot_product_attention()` doesn't handle -inf like you'd expect, instead
                 # it can produce NaNs.
                 ensure_finite_(attention_bias, check_neg_inf=True, check_pos_inf=False)
+            
+            if not torch.isfinite(attention_bias).all():
+                 print(f"[Model] attention_bias has non-finite values. min: {attention_bias.min().item()}", flush=True)
 
         attn_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = [] if use_cache else None
 
@@ -1390,6 +1394,7 @@ class LLaDAModel(nn.Module):
         # Apply final layer norm.
         # shape: (batch_size, seq_len or 1, d_model)
         x = self.transformer.ln_f(x)  # type: ignore
+
         if output_hidden_states:
             # add final hidden state post-final-layernorm, following HuggingFace's convention
             all_hidden_states.append(x)
