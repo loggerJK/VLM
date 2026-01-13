@@ -773,6 +773,7 @@ class Solver(FinetuneSolverBase):
         print(f"[Solver] Starting from Global Step: {self.global_step}")
 
         # Initial Validation (Unconditional)
+        # self.save_checkpoint(epoch=self.start_epoch, iteration=0, global_step=self.global_step)
         self.validate(epoch=self.start_epoch)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
@@ -814,7 +815,7 @@ class Solver(FinetuneSolverBase):
         if self.global_rank == 0 and self.args.use_wandb:
             wandb.finish()
 
-    def save_checkpoint(self, epoch, iteration=None):
+    def save_checkpoint(self, epoch, iteration=None, global_step=None):
         print(f"[Solver] Saving checkpoint at global step {self.global_step}")
         
         # Check if FSDP or regular model
@@ -830,6 +831,7 @@ class Solver(FinetuneSolverBase):
                 self.args,
                 epoch=epoch,
                 iteration=iteration,
+                global_step=global_step,
                 max_keep=self.args.ckpt_max_keep,
             )
         else:
@@ -838,6 +840,8 @@ class Solver(FinetuneSolverBase):
                 save_name = f"epoch{epoch}"
                 if iteration is not None:
                     save_name += f"-iter{iteration}"
+                if global_step is not None:
+                    save_name += f"-step{global_step}"
                 save_dir = os.path.join(self.args.output_dir, save_name)
                 os.makedirs(save_dir, exist_ok=True)
                 
@@ -1004,7 +1008,7 @@ class Solver(FinetuneSolverBase):
                      
                 # --- Step-based Saving ---
                 if self.global_step % self.args.save_iteration_interval == 0:
-                     self.save_checkpoint(epoch, iteration=data_iter_step)
+                     self.save_checkpoint(epoch, iteration=data_iter_step, global_step=self.global_step)
 
             torch.cuda.synchronize()
             metric_logger.update(loss=loss_value)
