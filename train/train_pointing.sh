@@ -22,11 +22,10 @@ lora_rank=128
 image_size=512
 task="pointing"
 max_seq_len=2048
-exp_name="Lumina-DiMOO-$task-Test"
+exp_name="Lumina-DiMOO-$task-full"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
-WANDB_API_KEY="your_api_key"
 
 mkdir -p "$output_dir"
 
@@ -46,20 +45,20 @@ python -m torch.distributed.run --nproc_per_node=${n_gpus} --master_port=29504 t
     --precision bf16 \
     --grad_precision bf16 \
     --image_size 512     \
-    --data_parallel none \
+    --data_parallel fsdp \
     --data_config $data_config \
     --num_workers 4 \
     --output_dir "$output_dir" \
-    --save_iteration_interval 300 \
-    --validation_interval 50 \
+    --save_iteration_interval 500 \
+    --validation_interval 100 \
     --max_seq_len ${max_seq_len} \
     --dropout ${dropout} \
     --init_from ${init_from} \
     --disable_length_clustering \
     --use_wandb \
-    --wandb_project "lumina-pointing-debug" \
-    --wandb_run_name "lora_on_fsdp_off" \
-    --use_lora \
+    --wandb_project "lumina-pointing" \
+    --wandb_run_name "full" \
     --lora_rank ${lora_rank} \
     --task ${task} \
     2>&1 | tee "$output_dir/output.log"
+    # --use_lora \

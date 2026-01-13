@@ -466,10 +466,11 @@ class Solver(FinetuneSolverBase):
 
     def _dataset_func(self):
         print("[Solver] Loading Hugging Face Datasets...")
-        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-updated'):
+        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'):
             from datasets import load_from_disk
-            train_ds = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-updated')
+            train_ds = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final')
         else:
+            print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
             train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
         # Validation Dataset (Streaming) - Stored in self.val_ds_stream
