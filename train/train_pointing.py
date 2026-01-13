@@ -466,17 +466,19 @@ class Solver(FinetuneSolverBase):
 
     def _dataset_func(self):
         print("[Solver] Loading Hugging Face Datasets...")
-        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'):
+        LOCAL_TRAIN_DIR = os.getenv('LOCAL_TRAIN_DIR', None)
+        LOCAL_VAL_DIR = os.getenv('LOCAL_VAL_DIR', None)
+        if LOCAL_TRAIN_DIR and os.path.exists(LOCAL_TRAIN_DIR):
             from datasets import load_from_disk
-            train_ds = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final')
+            train_ds = load_from_disk(LOCAL_TRAIN_DIR)
         else:
             print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
             train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
         # Validation Dataset (Streaming) - Stored in self.val_ds_stream
-        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained'):
+        if LOCAL_VAL_DIR and os.path.exists(LOCAL_VAL_DIR):
             from datasets import load_from_disk
-            self.val_ds_stream = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained/validation')
+            self.val_ds_stream = load_from_disk(os.path.join(LOCAL_VAL_DIR, "validation"))
         else:
             self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
 
@@ -899,7 +901,7 @@ class Solver(FinetuneSolverBase):
                 if len(final_input) > self.args.max_seq_len:
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
-                print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
+                # print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
                 # print(f"final_input : {len(final_input)}, final_label : {len(final_label)}")
 
                 input_ids_list.append(final_input)

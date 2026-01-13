@@ -26,6 +26,11 @@ exp_name="Lumina-DiMOO-$task-full"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
+WANDB_API_KEY="f9831e23517e27f7ecac9b54bc2cdcabb3af8c33"
+
+
+export LOCAL_TRAIN_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'
+export LOCAL_VAL_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained'
 
 mkdir -p "$output_dir"
 
