@@ -1,5 +1,5 @@
 import pickle
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Union
 import random
 from accelerate import init_empty_weights
 import torch
@@ -16,6 +16,12 @@ from pathlib import Path
 import wandb
 import re
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from sklearn.metrics import confusion_matrix
+import io
+from PIL import Image
 
 # HuggingFace & Diffusers
 from datasets import load_dataset
@@ -92,6 +98,33 @@ def extract_number(text):
         return int(match.group(1))
     return -1
 
+def extract_number_fixed(text):
+    """Extract number from text pattern **number**, number, or English words (zero-nine)."""
+    text = text.lower()
+    
+    # 1. Try **number**
+    match = re.search(r"\*\*(\d+)\*\*", text)
+    if match:
+        return int(match.group(1))
+    
+    # 2. Try English words (zero to nine)
+    word_to_num = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10
+    }
+    for word, num in word_to_num.items():
+        # Match whole word to avoid partial matches (e.g. 'one' in 'bone')
+        if re.search(r"\b" + word + r"\b", text):
+            return num
+
+    # 3. Try plain digits
+    match = re.search(r"(\d+)", text)
+    if match:
+        return int(match.group(1))
+        
+    return -1
+
 # ==============================================================================
 # 3. ItemProcessor (CPU Stage)
 # ==============================================================================
@@ -107,10 +140,15 @@ class ItemProcessorPointing(ItemProcessorBase):
         self.max_len = max_len
         self.image_size = image_size
 
-    def process_item(self, data_item: dict, training_mode=False) -> Tuple[Any, str, str]:
+    def process_item(self, data_item: dict, training_mode=False, task='counting') -> Tuple[Any, str, str]:
         image = data_item.get('image')
-        question = data_item.get('question', data_item.get('text', ''))
-        answer = str(data_item.get('answer', data_item.get('label', '')))
+        
+        if task == 'pointing':
+            question = data_item.get('question', data_item.get('text', ''))
+            answer = str(data_item.get('answer', data_item.get('label', '')))
+        else: # Default or 'counting'
+            question = data_item.get('question_count', data_item.get('text', ''))
+            answer = str(data_item.get('answer_count', data_item.get('label', '')))
 
         # Image Preprocessing (Crop) - Changed to 256 for stability
         crop_size_list = generate_crop_size_list((self.image_size // 32) ** 2, 32)
@@ -129,9 +167,10 @@ class HFDatasetWrapper(torch.utils.data.Dataset):
     """
     Wraps Hugging Face Dataset to be compatible with xllmx Sampler.
     """
-    def __init__(self, hf_dataset, item_processor):
+    def __init__(self, hf_dataset, item_processor, default_task='counting'):
         self.dataset = hf_dataset
         self.item_processor = item_processor
+        self.default_task = default_task
         self.meta_collection = [
             {
                 "type": "default",
@@ -147,7 +186,8 @@ class HFDatasetWrapper(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        return self.item_processor.process_item(item, training_mode=True)
+        task = item.get('task', self.default_task) # Get task from item, fallback to default_task
+        return self.item_processor.process_item(item, training_mode=True, task=task)
 
 
 import functools
@@ -167,16 +207,32 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--image_size", type=int, default=256, help="Image size for preprocessing (default: 256)")
         parser.add_argument("--cpu_offload", action="store_true", help="Enable CPU Offloading for FSDP (default: False)")
         
+        # Validation
+        parser.add_argument("--validation_interval", type=int, default=50, help="Validation interval in global steps")
+
         # WandB Arguments
         parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
         parser.add_argument("--wandb_project", type=str, default="lumina-dimoo-finetune", help="WandB project name")
         parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity name")
         parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name")
+
+        # LoRA Arguments
+        parser.add_argument("--use_lora", action="store_true", help="Enable LoRA training")
+        parser.add_argument("--lora_rank", type=int, default=8, help="LoRA rank")
+        parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
+        parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout")
+
+        # Task Argument
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type")
         return parser
     
     def setup_fsdp_sync(
         self, model: nn.Module, data_parallel: str, precision: str, grad_precision: str = None
-    ) -> FSDP:
+    ) -> Union[FSDP, nn.Module]:                                                                             
+        if data_parallel == "none":                                                                                                 
+           print("[Solver] Data parallel is 'none'. Bypassing FSDP and moving model to CUDA.")       
+           return model.cuda()
+
         print(f"[Solver] setup_fsdp_sync: cpu_offload={self.args.cpu_offload}")
         
         if self.dp_rank == 0:
@@ -187,12 +243,17 @@ class Solver(FinetuneSolverBase):
         # Set CPU Offload based on argument
         cpu_offload = CPUOffload(offload_params=self.args.cpu_offload)
 
+        # Handle LoRA wrapping policies if needed, but standard FSDP policy often works if layers are standard linear
+        # If LoRA is used, FSDP wraps the PeftModel
+        
         model = FSDP(
             model,
             auto_wrap_policy=functools.partial(
                 lambda_auto_wrap_policy,
                 lambda_fn=lambda m: m in model.get_fsdp_wrap_module_list(),
-            ),
+            ) if not self.args.use_lora else None, # Disable custom wrap policy for LoRA for now, let FSDP handle it or use default
+            # Note: For LoRA + FSDP, explicit wrapping is often better, but for now we try default or 'none' for debugging.
+            # If using 'none', this method returns early.
             process_group=fs_init.get_data_parallel_group(),
             sharding_strategy={
                 "fsdp": ShardingStrategy.FULL_SHARD,
@@ -230,26 +291,127 @@ class Solver(FinetuneSolverBase):
                 project=self.args.wandb_project,
                 entity=self.args.wandb_entity,
                 name=self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                config=vars(self.args)
+                config=vars(self.args),
+                mode="online"
             )
         self.val_table = None
+        self.global_step = 0
 
     def build_model(self):
-        # 1. Call super build_model to get model and tokenizer
-        model, tokenizer, _ = super().build_model()
+        # Full override of build_model to handle LoRA freezing correctly without relying on FinetuneSolverBase's logic
+        init_from = self.args.resume_path or self.args.init_from
         
-        # 2. Use 8-bit AdamW for memory efficiency
+        if init_from is None:
+            starting_point_path = Path(self.args.output_dir) / "starting_point"
+            if dist.get_rank() == 0:
+                if (starting_point_path / "config.json").exists():
+                    self.logger.info(f"will use existing starting point at {starting_point_path}")
+                else:
+                    self.logger.info(f"creating starting-point weights at {starting_point_path}")
+                    self._make_and_save_starting_point(save_path=str(starting_point_path))
+            dist.barrier()
+            init_from = str(starting_point_path)
+
+        self.logger.info(f"Start instantiating unwrapped model from {init_from}")
+        
+        # 1. Instantiate Model (and apply LoRA if enabled)
+        unwrapped_model, tokenizer = self._model_func(init_from)
+
+        # 2. Handle Trainable Parameters (Freezing Logic)
+        if self.args.use_lora:
+            # LoRA handles freezing internally in _model_func (get_peft_model), so we just log.
+            # Ensure we don't accidentally unfreeze everything.
+            from xllmx.util.tensor_type import promote_param_to_fp32
+            
+            # Explicitly ensure only LoRA params are trainable (double check)
+            # and promote trainable params to fp32 if needed (though BF16 training usually keeps them BF16)
+            # Actually, standard practice for LoRA is mixed precision. 
+            # If args.precision is bf16, we usually keep LoRA in bf16 or fp32.
+            
+            # print_param_status will be called later to verify.
+            pass 
+        else:
+            # Original Logic for Full Finetune
+            from xllmx.util.tensor_type import promote_param_to_fp32
+            if hasattr(unwrapped_model, "get_trainable_params"):
+                trainable_params = dict(unwrapped_model.get_trainable_params())
+                for key, param in unwrapped_model.named_parameters():
+                    if key in trainable_params:
+                        param.requires_grad = True
+                        promote_param_to_fp32(param)
+                    else:
+                        param.requires_grad = False
+                        keep_fp32_keywords = ["norm", "lm_head", "embed_tokens"]
+                        if any([_ in key for _ in keep_fp32_keywords]):
+                            promote_param_to_fp32(param)
+                        elif param.is_floating_point():
+                            param.data = param.data.to(self.mixed_precision_dtype)
+            else:
+                # Default: All Trainable
+                self.logger.warning(
+                    f"model class {type(unwrapped_model)} does not have `get_trainable_params` method,"
+                    f"set all params to trainable"
+                )
+                for key, param in unwrapped_model.named_parameters():
+                    param.requires_grad = True
+                    promote_param_to_fp32(param)
+
+        self.logger.info("Finish instantiating unwrapped model.")
+        
+        misc.mark_mp_params(unwrapped_model)
+        misc.print_param_status(unwrapped_model)
+
+        # 3. Checkpointing (Part 1)
+        if self.args.checkpointing:
+            checkpointing_list = unwrapped_model.get_checkpointing_wrap_module_list() if hasattr(unwrapped_model, 'get_checkpointing_wrap_module_list') else []
+        else:
+            checkpointing_list = []
+
+        # 4. FSDP Wrapping
+        model = self.setup_fsdp_sync(
+            unwrapped_model, self.args.data_parallel, self.args.precision, self.args.grad_precision
+        )
+
+        # broadcast non-model-parallel parameters within model parallel group
+        misc.broadcast_nonmp_parameters(model)
+
+        # 5. Checkpointing (Part 2)
+        if self.args.checkpointing:
+            print("apply gradient checkpointing")
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl, apply_activation_checkpointing, checkpoint_wrapper
+            )
+            non_reentrant_wrapper = functools.partial(
+                checkpoint_wrapper,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            )
+            
+            # Helper to check if module is in the list
+            # For LoRA, the structure might change, so we might need a more robust check.
+            # But get_checkpointing_wrap_module_list returns actual module objects, so it should work if they persist.
+            def check_fn(submodule):
+                return submodule in checkpointing_list
+
+            apply_activation_checkpointing(
+                model,
+                checkpoint_wrapper_fn=non_reentrant_wrapper,
+                check_fn=check_fn,
+            )
+
+        self.logger.info(f"Wrapped model: \n{str(model)}")
+
+        # 6. Optimizer
         try:
             import bitsandbytes as bnb
             print("[Solver] Using bitsandbytes.optim.AdamW8bit Optimizer...")
             optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=self.args.lr, weight_decay=self.args.wd, betas=(0.9, 0.95))
-        except ImportError:
-            print("[Solver] bitsandbytes not found, falling back to Standard torch.optim.AdamW...")
+        except (ImportError, RuntimeError):
+            print("[Solver] bitsandbytes not found or failed to load, falling back to Standard torch.optim.AdamW...")
             optimizer = torch.optim.AdamW(model.parameters(), lr=self.args.lr, weight_decay=self.args.wd, betas=(0.9, 0.95))
         
         return model, tokenizer, optimizer
 
-    def _model_func(self, init_from: str) -> (LLaDAForMultiModalGeneration, None):
+    def _model_func(self, init_from: str) -> (nn.Module, None):
         tokenizer = AutoTokenizer.from_pretrained(init_from, trust_remote_code=True)
         
         # Determine dtype based on precision arg
@@ -271,6 +433,30 @@ class Solver(FinetuneSolverBase):
         if self.args.checkpointing:
             print("[Solver] Enabling Activation Checkpointing...")
             model.model.set_activation_checkpointing("whole_layer")
+
+        # --- LoRA Injection ---
+        if self.args.use_lora:
+            print(f"[Solver] Applying LoRA with rank: {self.args.lora_rank}, alpha: {self.args.lora_alpha}, dropout: {self.args.lora_dropout}")
+            from peft import LoraConfig, get_peft_model, TaskType
+            
+            target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
+            print(f"[Solver] LoRA Target Modules: {target_modules}")
+            
+            # Freeze base model parameters
+            for param in model.parameters():
+                param.requires_grad = False
+            
+            lora_config = LoraConfig(
+                r=self.args.lora_rank,
+                lora_alpha=self.args.lora_alpha,
+                target_modules=target_modules,
+                lora_dropout=self.args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM", # Using CAUSAL_LM as generic base, though it's multimodal
+                modules_to_save=[] # Add if needed
+            )
+            model = get_peft_model(model, lora_config)
+            model.print_trainable_parameters()
             
         return model, tokenizer
 
@@ -280,13 +466,21 @@ class Solver(FinetuneSolverBase):
 
     def _dataset_func(self):
         print("[Solver] Loading Hugging Face Datasets...")
-        train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
+        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-updated'):
+            from datasets import load_from_disk
+            train_ds = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-updated')
+        else:
+            train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
         # Validation Dataset (Streaming) - Stored in self.val_ds_stream
-        self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
+        if os.path.exists('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained'):
+            from datasets import load_from_disk
+            self.val_ds_stream = load_from_disk('/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained/validation')
+        else:
+            self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
-        return HFDatasetWrapper(train_ds, item_processor)
+        return HFDatasetWrapper(train_ds, item_processor, default_task=self.args.task)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
         print(f"[Solver] Creating starting point at {save_path}...")
@@ -311,50 +505,68 @@ class Solver(FinetuneSolverBase):
         tokenizer.save_pretrained(save_path)
         print("[Solver] Starting point saved.")
 
+    @torch.no_grad()
     def validate(self, epoch):
-        if self.global_rank != 0:
-            return
-
-        print(f"\n[Epoch {epoch}] Running Validation on CountBenchQA...")
+        dist.barrier() # Sync before validation
+        
+        # Turn off lora
+        # self.model.disable_adapter_layers() if self.args.use_lora else None
+        
+        if self.global_rank == 0:
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on CountBenchQA...")
+        
         self.model.eval()
         
         # Ensure VQ-VAE is loaded
         if not hasattr(self, 'vqvae'):
+            print("[Solver] Loading VQ-VAE for validation...")
              # Reuse logic from train_one_epoch
-             if self.args.precision == "bf16":
+            if self.args.precision == "bf16":
                 dtype = torch.bfloat16
-             elif self.args.precision == "fp16":
+            elif self.args.precision == "fp16":
                 raise ValueError("FP16 precision is not supported for VQ-VAE.")
-             else:
+            else:
                 dtype = torch.float32
-             self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
-             self.vqvae.eval()
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+            self.vqvae.eval()
 
         correct = 0
         total = 0
         eval_limit = 100 
         
+        # All ranks iterate, but effectively they process the same data if not sharded. 
+        # For FSDP generation, they MUST run the same inputs to keep internal states synced.
         eval_dataset = iter(self.val_ds_stream)
         details_buffer = []
+        gt_counts = []
+        pred_counts = []
         
         # WandB Table
-        if self.val_table is None and self.args.use_wandb:
+        if self.val_table is None and self.args.use_wandb and self.global_rank == 0:
             self.val_table = wandb.Table(columns=["Step", "Accuracy", "Details"])
 
         with torch.no_grad():
             count = 0
-            progress = tqdm(range(eval_limit), desc="Validation", unit="sample")
+            # Only rank 0 shows progress bar to avoid clutter
+            disable_tqdm = (self.global_rank != 0)
+            progress = tqdm(range(eval_limit), desc="Validation", unit="sample", disable=disable_tqdm)
             
             for item in eval_dataset:
                 if count >= eval_limit:
                     break
                 
                 image = item.get('image')
-                question = item.get('question')
+                if self.args.task == 'pointing':
+                    question = item.get('question', item.get('text', ''))
+                    gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
+                    label = item.get('label', '<object>')
+                else:
+                    question = item.get('question_count', item.get('text', ''))
+                    gt_count = item.get('count')
+                    label = item.get('label', '<object>')
+
                 if image is None: continue
-                gt_count = item.get('count')
-                if gt_count is None: continue
-                label = item.get('label', '<object>')
+                if gt_count is None: continue # Skip if no GT count available
 
                 # Preprocess Image
                 crop_size_list = generate_crop_size_list((self.args.image_size // 32) ** 2, 32)
@@ -366,7 +578,12 @@ class Solver(FinetuneSolverBase):
                 img_token = [BOI] + img_token + [EOI]
                 
                 # Prepare Prompt
-                question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
+                if self.args.task == 'pointing':
+                     # Adjust prompt for pointing if needed, currently reusing similar structure
+                     question_prompt = f"{question}" 
+                else:
+                     question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
+
                 instruction = "<system>You are a multimodal model that can process both text and images. Answer the following question based on the provided images.</system>" + \
                               "<user>" + question_prompt + "</user>"
                 
@@ -377,56 +594,112 @@ class Solver(FinetuneSolverBase):
                 
                 # Prepare Generation Input
                 code_start = len(input_token) + 1
-                input_token = input_token + [BOA] + 20 * [MASK] # gen_length=20 for short answer
+                GEN_LENGTH= 20
+                input_token = input_token + [BOA] + GEN_LENGTH * [MASK] # gen_length=10 for short answer
                 input_ids = torch.tensor(input_token, device="cuda").unsqueeze(0)
                 
-                # Generate
+                # Generate (All ranks must call this!)
                 out_new = generate_text_understanding(
                     self.model, input_ids,
-                    steps=16, # reduced steps for validation speed
-                    gen_length=20,
-                    block_length=20, # one block
+                    steps=GEN_LENGTH, # reduced steps for validation speed
+                    gen_length=GEN_LENGTH,
+                    block_length=GEN_LENGTH, # one block
                     temperature=0.0,
                     cfg_scale=0.0,
                     remasking='low_confidence',
                     code_start=code_start
                 )
                 
-                answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
-                pred_count = extract_number(answer)
+                # Only Rank 0 processes results for logging
+                if self.global_rank == 0:
+                    answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
+                    pred_count = extract_number(answer)
+                    
+                    gt_count_val = int(gt_count)
+                    pred_count_val = int(pred_count)
+                    is_correct = bool(pred_count_val == gt_count_val)
+                    
+                    gt_counts.append(gt_count_val)
+                    pred_counts.append(pred_count_val)
+
+                    if is_correct:
+                        correct += 1
+                    total += 1
+                    
+                    res_str = f"[{count + 1}] GT: {gt_count_val} | Pred: {pred_count_val} | Correct: {is_correct} | Ans: {answer}"
+                    print(res_str)
+                    details_buffer.append(res_str)
                 
-                gt_count_val = int(gt_count)
-                pred_count_val = int(pred_count)
-                is_correct = bool(pred_count_val == gt_count_val)
-                
-                if is_correct:
-                    correct += 1
-                total += 1
                 count += 1
-                
-                res_str = f"[{count}] GT: {gt_count_val} | Pred: {pred_count_val} | Correct: {is_correct} | Ans: {answer}"
-                print(res_str)
-                details_buffer.append(res_str)
                 progress.update(1)
+                
+                # Prevent VRAM accumulation
+                if count % 2 == 0:
+                    import gc; gc.collect()
+                    torch.cuda.empty_cache()
             
             progress.close()
-            
-        accuracy = correct / total if total > 0 else 0
-        print(f"Validation Accuracy: {accuracy:.4f} ({correct}/{total})")
-        
-        if self.args.use_wandb and self.val_table is not None:
-            all_details = "\n".join(details_buffer)
-            self.val_table.add_data(epoch, accuracy, all_details)
-            wandb.log({
-                "val/accuracy": accuracy, 
-                "epoch": epoch,
-                "val/predictions": self.val_table
-            })
-        
-        # Cleanup
-        del eval_dataset
-        torch.cuda.empty_cache()
-        self.model.train()
+                    
+            if self.global_rank == 0:
+                accuracy = correct / total if total > 0 else 0
+                
+                # Calculate Mean Average Deviation
+                deviations = [abs(g - p) for g, p in zip(gt_counts, pred_counts)]
+                mean_avg_deviation = sum(deviations) / len(deviations) if deviations else 0.0
+                
+                print(f"Validation Accuracy: {accuracy:.4f} ({correct}/{total})")
+                print(f"Mean Average Deviation: {mean_avg_deviation:.4f}")
+                
+                # Generate Confusion Matrix
+                try:
+                    # Filter valid predictions (non-negative) for matrix
+                    valid_indices = [i for i, p in enumerate(pred_counts) if p >= 0]
+                    valid_gt = [gt_counts[i] for i in valid_indices]
+                    valid_pred = [pred_counts[i] for i in valid_indices]
+                    
+                    # Determine labels range
+                    labels = sorted(list(set(valid_gt + valid_pred)))
+                    cm = confusion_matrix(valid_gt, valid_pred, labels=labels)
+                    
+                    plt.figure(figsize=(10, 8))
+                    sns.heatmap(cm, annot=True, fmt='d', cmap='viridis', xticklabels=labels, yticklabels=labels)
+                    plt.xlabel('Predicted Count')
+                    plt.ylabel('Target Count')
+                    plt.title(f'Confusion Matrix (Acc: {accuracy:.4f}, MAD: {mean_avg_deviation:.4f})')
+                    
+                    # Save to buffer
+                    buf = io.BytesIO()
+                    plt.savefig(buf, format='png')
+                    buf.seek(0)
+                    cm_image = Image.open(buf)
+                    
+                    plt.close()
+                except Exception as e:
+                    print(f"Error generating confusion matrix: {e}")
+                    cm_image = None
+    
+                if self.args.use_wandb:
+                    all_details = "\n".join(details_buffer)
+                    if self.val_table is not None:
+                        self.val_table.add_data(self.global_step, accuracy, all_details)
+                    
+                    log_data = {
+                        "val/accuracy": accuracy, 
+                        "val/mean_avg_deviation": mean_avg_deviation,
+                        "val/epoch": epoch,
+                        "global_step": self.global_step,
+                        "val/predictions": self.val_table
+                    }
+                    
+                    if cm_image is not None:
+                        log_data["val/confusion_matrix"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
+                    
+                    wandb.log(log_data)
+                
+                # Cleanup
+                del eval_dataset
+                torch.cuda.empty_cache()
+                self.model.train()        
 
     def run(self):
         # Check for NaNs in parameters
@@ -451,8 +724,16 @@ class Solver(FinetuneSolverBase):
              self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
              self.vqvae.eval()
 
-        # Initial Validation
-        self.validate(epoch=0)
+        # Initialize global step (estimate)
+        steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
+        self.global_step = self.start_epoch * steps_per_epoch
+        if self.start_iter > 0:
+            self.global_step += self.start_iter // self.args.accum_iter
+            
+        print(f"[Solver] Starting from Global Step: {self.global_step}")
+
+        # Initial Validation (Unconditional)
+        self.validate(epoch=self.start_epoch)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()
@@ -466,17 +747,11 @@ class Solver(FinetuneSolverBase):
                 metric_logger=self.metric_logger_to_resume,
             )
 
+            # End of Epoch Save (optional, since we now save by step, but good to keep)
             if epoch % self.args.save_interval == 0 or epoch + 1 == self.args.epochs:
-                util.ckpt.save(
-                    self.args.output_dir,
-                    self.global_rank == 0,
-                    self.model,
-                    self.optimizer,
-                    self.tokenizer,
-                    self.args,
-                    epoch=epoch,
-                    max_keep=self.args.ckpt_max_keep,
-                )
+                 # Check if we just saved to avoid double saving
+                 if self.global_step % self.args.save_iteration_interval != 0:
+                    self.save_checkpoint(epoch=epoch)
 
             log_stats = {**{f"train_{k}": v for k, v in train_stats.items()}, "epoch": epoch}
 
@@ -489,9 +764,6 @@ class Solver(FinetuneSolverBase):
                 if self.args.use_wandb:
                     wandb.log(log_stats)
             
-            # Validation at end of epoch
-            self.validate(epoch=epoch + 1)
-
             self.start_iter = 0
             self.metric_logger_to_resume = None
 
@@ -502,6 +774,51 @@ class Solver(FinetuneSolverBase):
         if self.global_rank == 0 and self.args.use_wandb:
             wandb.finish()
 
+    def save_checkpoint(self, epoch, iteration=None):
+        print(f"[Solver] Saving checkpoint at global step {self.global_step}")
+        
+        # Check if FSDP or regular model
+        is_fsdp = isinstance(self.model, FSDP)
+        
+        if is_fsdp:
+            util.ckpt.save(
+                self.args.output_dir,
+                self.global_rank == 0,
+                self.model,
+                self.optimizer,
+                self.tokenizer,
+                self.args,
+                epoch=epoch,
+                iteration=iteration,
+                max_keep=self.args.ckpt_max_keep,
+            )
+        else:
+            # Handle Non-FSDP / LoRA Saving
+            if self.global_rank == 0:
+                save_name = f"epoch{epoch}"
+                if iteration is not None:
+                    save_name += f"-iter{iteration}"
+                save_dir = os.path.join(self.args.output_dir, save_name)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                if self.args.use_lora:
+                    # Save Adapter Only
+                    self.model.save_pretrained(save_dir)
+                    print(f"[Solver] Saved LoRA adapter to {save_dir}")
+                else:
+                    # Save Full Model
+                    torch.save(self.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+                    print(f"[Solver] Saved full model to {save_dir}")
+                
+                # Save Tokenizer and Args
+                self.tokenizer.save_pretrained(save_dir)
+                with open(os.path.join(save_dir, "args.json"), "w") as f:
+                    json.dump(vars(self.args), f, indent=2)
+                
+                # Handle rotation (remove old checkpoints)
+                util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
+        
+        dist.barrier() # Sync
 
     def train_one_epoch(self, epoch: int, start_iter: int, log_writer=None, metric_logger=None):
         if not hasattr(self, 'vqvae'):
@@ -527,6 +844,8 @@ class Solver(FinetuneSolverBase):
         accum_iter = self.args.accum_iter
 
         self.optimizer.zero_grad()
+        
+        accumulated_loss = 0.0 # Initialize loss accumulator
 
         for data_iter_step, batch_data in enumerate(
             metric_logger.log_every(
@@ -579,7 +898,7 @@ class Solver(FinetuneSolverBase):
                 if len(final_input) > self.args.max_seq_len:
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
-                # print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
+                print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
                 # print(f"final_input : {len(final_input)}, final_label : {len(final_label)}")
 
                 input_ids_list.append(final_input)
@@ -599,10 +918,11 @@ class Solver(FinetuneSolverBase):
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                c_loss = self.model(examples, labels)
+                c_loss = self.model(input_ids=examples, labels=labels)
 
             loss = c_loss
             loss_value = loss.item()
+            accumulated_loss += loss_value # Accumulate loss
 
             if not math.isfinite(loss_value):
                 print(f"[Rank {self.global_rank}] Loss is {loss_value}, stopping training")
@@ -614,10 +934,37 @@ class Solver(FinetuneSolverBase):
             effective_loss = loss / accum_iter
             effective_loss.backward()
 
+            # Gradient Accumulation Step
             if (data_iter_step + 1) % accum_iter == 0:
-                self.model.clip_grad_norm_(max_norm=self.args.clip_grad)
+                if isinstance(self.model, FSDP):
+                    self.model.clip_grad_norm_(max_norm=self.args.clip_grad)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.args.clip_grad)
+                
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
+                
+                # Increment Global Step
+                self.global_step += 1
+
+                # --- WandB Logging per Step ---
+                if self.global_rank == 0 and self.args.use_wandb:
+                     avg_loss = accumulated_loss / accum_iter
+                     wandb.log({
+                        "train/loss": avg_loss,
+                        "train/lr": self.optimizer.param_groups[0]["lr"],
+                        "train/global_step": self.global_step,
+                        "train/epoch": epoch + (data_iter_step / len(self.dataloader_train))
+                     })
+                     accumulated_loss = 0.0 # Reset accumulator
+                
+                # --- Step-based Validation ---
+                if self.global_step % self.args.validation_interval == 0:
+                     self.validate(epoch)
+                     
+                # --- Step-based Saving ---
+                if self.global_step % self.args.save_iteration_interval == 0:
+                     self.save_checkpoint(epoch, iteration=data_iter_step)
 
             torch.cuda.synchronize()
             metric_logger.update(loss=loss_value)
@@ -629,5 +976,6 @@ class Solver(FinetuneSolverBase):
 
 if __name__ == "__main__":
     args = Solver.get_args_parser().parse_args()
+    util.misc.random_seed(42)
     solver = Solver(args)
     solver.run()
