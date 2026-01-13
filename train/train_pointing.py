@@ -45,6 +45,8 @@ from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, v
 # Generation Utils
 from generators.text_understanding_generator import generate_text_understanding
 
+from transformers import enable_full_determinism
+
 
 # ==============================================================================
 # 1. Special Tokens Global Definition
@@ -359,7 +361,33 @@ class Solver(FinetuneSolverBase):
         self.logger.info("Finish instantiating unwrapped model.")
         
         misc.mark_mp_params(unwrapped_model)
-        misc.print_param_status(unwrapped_model)
+        # misc.print_param_status(unwrapped_model)
+        
+        # =======================================================
+        # total trainable params
+        # =======================================================
+        train_param_count_local, train_param_count_all = 0, 0
+        frozen_param_count_local, frozen_param_count_all = 0, 0
+        for name, param in unwrapped_model.named_parameters():
+            model_parallel = getattr(param, "model_parallel", False)
+            if param.requires_grad:
+                if model_parallel:
+                    train_param_count_all += param.numel() * fs_init.get_model_parallel_world_size()
+                else:
+                    train_param_count_all += param.numel()
+                train_param_count_local += param.numel()
+            else:
+                if model_parallel:
+                    frozen_param_count_all += param.numel() * fs_init.get_model_parallel_world_size()
+                else:
+                    frozen_param_count_all += param.numel()
+                frozen_param_count_local += param.numel()
+        self.logger.info(
+            f"Trainable parameter count : {train_param_count_local} (local rank), {train_param_count_all} (all).\n"
+            f"Frozen parameter count : {frozen_param_count_local} (local rank), {frozen_param_count_all} (all)."
+            f"Trainable ratio: {train_param_count_all / (train_param_count_all + frozen_param_count_all)*100:.6f}%"
+        )
+
 
         # 3. Checkpointing (Part 1)
         if self.args.checkpointing:
@@ -559,14 +587,10 @@ class Solver(FinetuneSolverBase):
                     break
                 
                 image = item.get('image')
-                if self.args.task == 'pointing':
-                    question = item.get('question', item.get('text', ''))
-                    gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
-                    label = item.get('label', '<object>')
-                else:
-                    question = item.get('question_count', item.get('text', ''))
-                    gt_count = item.get('count')
-                    label = item.get('label', '<object>')
+                question = item.get('question', '')
+                gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
+                label = item.get('label', '<object>')
+                question = question.replace('**<number>** of', '**<number>**')
 
                 if image is None: continue
                 if gt_count is None: continue # Skip if no GT count available
@@ -580,15 +604,9 @@ class Solver(FinetuneSolverBase):
                 img_token = add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE)
                 img_token = [BOI] + img_token + [EOI]
                 
-                # Prepare Prompt
-                if self.args.task == 'pointing':
-                     # Adjust prompt for pointing if needed, currently reusing similar structure
-                     question_prompt = f"{question}" 
-                else:
-                     question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
 
                 instruction = "<system>You are a multimodal model that can process both text and images. Answer the following question based on the provided images.</system>" + \
-                              "<user>" + question_prompt + "</user>"
+                              "<user>" + question + "</user>"
                 
                 input_ids_raw = self.tokenizer(instruction)['input_ids']
                 
@@ -616,7 +634,7 @@ class Solver(FinetuneSolverBase):
                 # Only Rank 0 processes results for logging
                 if self.global_rank == 0:
                     answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
-                    pred_count = extract_number(answer)
+                    pred_count = extract_number_fixed(answer)
                     
                     gt_count_val = int(gt_count)
                     pred_count_val = int(pred_count)
@@ -629,8 +647,9 @@ class Solver(FinetuneSolverBase):
                         correct += 1
                     total += 1
                     
-                    res_str = f"[{count + 1}] GT: {gt_count_val} | Pred: {pred_count_val} | Correct: {is_correct} | Ans: {answer}"
+                    res_str = f"\n[{count + 1}] \nQuestion: {question} \nGT: {gt_count_val} \nPred: {pred_count_val} \nCorrect: {is_correct} \nAns: {answer}"
                     print(res_str)
+                    print("-" * 50)
                     details_buffer.append(res_str)
                 
                 count += 1
@@ -677,6 +696,22 @@ class Solver(FinetuneSolverBase):
                     cm_image = Image.open(buf)
                     
                     plt.close()
+                    
+                    # Fixed range 0-20 version 
+                    labels_fixed_range = list(range(0, 21)) # Fixed range for counting 0-20
+                    cm_fixed = confusion_matrix(valid_gt, valid_pred, labels=labels_fixed_range)
+                    plt.figure(figsize=(10, 8))
+                    sns.heatmap(cm_fixed, annot=True, fmt='d', cmap='viridis', xticklabels=labels_fixed_range, yticklabels=labels_fixed_range)
+                    plt.xlabel('Predicted Count')
+                    plt.ylabel('Target Count')  
+                    plt.title(f'Confusion Matrix 0-20 (Acc: {accuracy:.4f}, MAD: {mean_avg_deviation:.4f})')
+                    # Save to buffer
+                    buf_fixed = io.BytesIO()
+                    plt.savefig(buf_fixed, format='png')
+                    buf_fixed.seek(0)
+                    cm_image_fixed = Image.open(buf_fixed)
+                    plt.close()
+                    
                 except Exception as e:
                     print(f"Error generating confusion matrix: {e}")
                     cm_image = None
@@ -696,6 +731,8 @@ class Solver(FinetuneSolverBase):
                     
                     if cm_image is not None:
                         log_data["val/confusion_matrix"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
+                    if cm_image_fixed is not None:
+                        log_data["val/confusion_matrix_0-20"] = wandb.Image(cm_image_fixed, caption=f"Confusion Matrix 0-20 Epoch {epoch}")
                     
                     wandb.log(log_data)
                 
