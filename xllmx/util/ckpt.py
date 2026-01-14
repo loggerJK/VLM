@@ -52,6 +52,7 @@ def save(
     args=None,
     epoch=None,
     iteration=None,
+    global_step=None,
     additional_rank_common: Optional[Dict] = None,
     additional_rank_specific: Optional[Dict] = None,
     max_keep=2,
@@ -59,6 +60,8 @@ def save(
     save_name = f"epoch{epoch}"
     if iteration is not None:
         save_name += f"-iter{iteration}"
+    if global_step is not None:
+        save_name += f"-step{global_step}"
     save_dir = os.path.join(output_dir, save_name)
 
     os.makedirs(save_dir, exist_ok=True)

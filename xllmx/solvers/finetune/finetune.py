@@ -202,7 +202,7 @@ class FinetuneSolverBase(ABC):
 
         # Parallel
         parser.add_argument("--model_parallel_size", type=int, default=1)
-        parser.add_argument("--data_parallel", type=str, choices=["sdp", "fsdp"], default="sdp")
+        parser.add_argument("--data_parallel", type=str, choices=["sdp", "fsdp", "none"], default="sdp")
         parser.add_argument("--precision", type=str, choices=["fp16", "bf16", "tf32"], default="bf16")
         parser.add_argument("--grad_precision", choices=["fp32", "fp16", "bf16"], default="fp32")
 
@@ -257,6 +257,7 @@ class FinetuneSolverBase(ABC):
         # =======================================================
         if hasattr(unwrapped_model, "get_trainable_params"):
             trainable_params = dict(unwrapped_model.get_trainable_params())
+            print(f"trainable params: {trainable_params.keys()}")
             for key, param in unwrapped_model.named_parameters():
                 if key in trainable_params:
                     param.requires_grad = True
