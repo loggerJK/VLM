@@ -224,6 +224,12 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha")
         parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout")
 
+        # Training Arguments
+        parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
+        
+        # Validation Arguments
+        parser.add_argument("--validation_as_pointing_format", action="store_true", help="Use pointing format for validation")
+
         # Task Argument
         parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type")
         return parser
@@ -468,6 +474,8 @@ class Solver(FinetuneSolverBase):
             from peft import LoraConfig, get_peft_model, TaskType
             
             target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
+            if self.args.wo_lm_head:
+                target_modules = [tm for tm in target_modules if tm != "ff_out"]
             print(f"[Solver] LoRA Target Modules: {target_modules}")
             
             # Freeze base model parameters
@@ -503,12 +511,16 @@ class Solver(FinetuneSolverBase):
             print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
             train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
-        # Validation Dataset (Streaming) - Stored in self.val_ds_stream
+        # Validation Dataset (Map-style) - Stored in self.val_ds
         if LOCAL_VAL_DIR and os.path.exists(LOCAL_VAL_DIR):
             from datasets import load_from_disk
-            self.val_ds_stream = load_from_disk(os.path.join(LOCAL_VAL_DIR, "validation"))
+            self.val_ds = load_from_disk(os.path.join(LOCAL_VAL_DIR, "validation"))
+            # Limit to 100 for speed if needed, or keep full
+            if len(self.val_ds) > 100:
+                self.val_ds = self.val_ds.select(range(100))
         else:
-            self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
+            # Load only first 100 samples
+            self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
         return HFDatasetWrapper(train_ds, item_processor, default_task=self.args.task)
@@ -537,7 +549,7 @@ class Solver(FinetuneSolverBase):
         print("[Solver] Starting point saved.")
 
     @torch.no_grad()
-    def validate(self, epoch):
+    def validate(self, epoch, format="counting"):
         dist.barrier() # Sync before validation
         
         # Turn off lora
@@ -591,6 +603,15 @@ class Solver(FinetuneSolverBase):
                 gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
                 label = item.get('label', '<object>')
                 question = question.replace('**<number>** of', '**<number>**')
+                
+                if format == 'pointing':
+                    question_point_example = f'''<points x1="<coordinate of  x1>" y1="<coordinate of  y1>" x2="<coordinate of  x2>" y2="<coordinate of  y2>" ... x_n="<coordinate of  x_n>" y_n="<coordinate of  y_n>" alt="{label}">{label}</points>.'''.strip()
+                    question_count_example = f"There are **<number>** {label} in the image.".strip()
+                    
+                    question = (
+                        f"Locate all {label}. How many {label} are there in the image?. "
+                        f"Response Example : {question_point_example}. {question_count_example}"
+                    )
 
                 if image is None: continue
                 if gt_count is None: continue # Skip if no GT count available
@@ -615,7 +636,7 @@ class Solver(FinetuneSolverBase):
                 
                 # Prepare Generation Input
                 code_start = len(input_token) + 1
-                GEN_LENGTH= 20
+                GEN_LENGTH= 20 if format == "counting" else 400
                 input_token = input_token + [BOA] + GEN_LENGTH * [MASK] # gen_length=10 for short answer
                 input_ids = torch.tensor(input_token, device="cuda").unsqueeze(0)
                 
@@ -669,8 +690,8 @@ class Solver(FinetuneSolverBase):
                 deviations = [abs(g - p) for g, p in zip(gt_counts, pred_counts)]
                 mean_avg_deviation = sum(deviations) / len(deviations) if deviations else 0.0
                 
-                print(f"Validation Accuracy: {accuracy:.4f} ({correct}/{total})")
-                print(f"Mean Average Deviation: {mean_avg_deviation:.4f}")
+                print(f"Validation Accuracy ({format}): {accuracy:.4f} ({correct}/{total})")
+                print(f"Mean Average Deviation ({format}): {mean_avg_deviation:.4f}")
                 
                 # Generate Confusion Matrix
                 try:
@@ -715,24 +736,25 @@ class Solver(FinetuneSolverBase):
                 except Exception as e:
                     print(f"Error generating confusion matrix: {e}")
                     cm_image = None
-    
+                    cm_image_fixed = None
+                    
                 if self.args.use_wandb:
                     all_details = "\n".join(details_buffer)
                     if self.val_table is not None:
                         self.val_table.add_data(self.global_step, accuracy, all_details)
                     
                     log_data = {
-                        "val/accuracy": accuracy, 
-                        "val/mean_avg_deviation": mean_avg_deviation,
+                        "val/accuracy" if format == "counting" else "val/accuracy_pointing": accuracy, 
+                        "val/mean_avg_deviation" if format == "counting" else "val/mean_avg_deviation_pointing": mean_avg_deviation,
                         "val/epoch": epoch,
                         "global_step": self.global_step,
                         "val/predictions": self.val_table
                     }
                     
                     if cm_image is not None:
-                        log_data["val/confusion_matrix"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
+                        log_data["val/confusion_matrix" if format == "counting" else "val/confusion_matrix_pointing"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
                     if cm_image_fixed is not None:
-                        log_data["val/confusion_matrix_0-20"] = wandb.Image(cm_image_fixed, caption=f"Confusion Matrix 0-20 Epoch {epoch}")
+                        log_data["val/confusion_matrix_0-20" if format == "counting" else "val/confusion_matrix_0-20_pointing"] = wandb.Image(cm_image_fixed, caption=f"Confusion Matrix 0-20 Epoch {epoch}")
                     
                     wandb.log(log_data)
                 
@@ -775,6 +797,8 @@ class Solver(FinetuneSolverBase):
         # Initial Validation (Unconditional)
         # self.save_checkpoint(epoch=self.start_epoch, iteration=0, global_step=self.global_step)
         self.validate(epoch=self.start_epoch)
+        if self.args.validation_as_pointing_format:
+            self.validate(epoch=self.start_epoch, format="pointing")
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()
@@ -1005,6 +1029,8 @@ class Solver(FinetuneSolverBase):
                 # --- Step-based Validation ---
                 if self.global_step % self.args.validation_interval == 0:
                      self.validate(epoch)
+                     if self.args.validation_as_pointing_format:
+                         self.validate(epoch, format="pointing")
                      
                 # --- Step-based Saving ---
                 if self.global_step % self.args.save_iteration_interval == 0:
