@@ -1,8 +1,12 @@
 #!/bin/bash
 set -e
 export CUDA_VISIBLE_DEVICES=6
+#!/usr/bin/env bash
 
-# Activate conda environment
+export WANDB_API_KEY=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
+export WANDB_PROJECT=lumina-generation-debug      # 선택
+
+python train.py# Activate conda environment
 source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || source /opt/conda/etc/profile.d/conda.sh 2>/dev/null
 conda activate lumina_dimoo
 
