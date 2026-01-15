@@ -56,7 +56,6 @@ PAD = 126339                          # Padding token
 # 2. Helper Functions
 # ==============================================================================
 
-# #agent edited: [2] Masking function for Generation (from train.py)
 def mask_codes(codes, sch="cosine", mask = False, editing = False):
     """
     Applies masking to the target tokens for Masked Diffusion Loss.
@@ -416,9 +415,7 @@ class Solver(FinetuneSolverBase):
             print("[Solver] Enabling Gradient Checkpointing...")
             model.model.set_activation_checkpointing("whole_layer")
 
-        # #agent edited: [7] LoRA or Full Finetuning Switch
         if self.args.use_lora:
-
             for param in model.parameters():
                 param.requires_grad = False  # Freeze all parameters
                 
@@ -489,7 +486,7 @@ class Solver(FinetuneSolverBase):
 
         # Sample 10 random indices with fixed seed for consistency
         rng = random.Random(42) 
-        indices = rng.sample(range(len(val_ds)), min(3, len(val_ds)))
+        indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
         
         self.validation_prompts = []
         text_keys = ['descriptions', 'text', 'caption', 'prompt']
@@ -768,8 +765,6 @@ class Solver(FinetuneSolverBase):
                 img = images_tuple[i]
                 caption = captions_tuple[i]
 
-                # #agent edited: [9] Text-to-Image Generation Logic
-                # 1. Encode Image (GPU)
                 with torch.no_grad():
                     # encode_img_with_breaks returns tokens with newline separator
                     image_tokens = encode_img_with_breaks(img, self.vqvae)
@@ -783,17 +778,8 @@ class Solver(FinetuneSolverBase):
                 instruction = f"<system>{system_prompt}</system><user>{caption}</user>"
                 
                 instruction_token = self.tokenizer(instruction, truncation=True, max_length=512, padding=False, return_tensors="pt").input_ids[0].tolist()
+                final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]                
                 
-                # 4. Construct Full Sequence
-                # Structure: [Instruction] + [BOA] + [BOI] + [Masked Image] + [EOI] + [EOA]
-                # Label:     [-100...]     + [-100] + [-100] + [Original Image] + [-100] + [-100]
-                
-                # Note: 'image_tokens' from 'encode_img_with_breaks' doesn't have BOI/EOI, but has newlines.
-                # We add Special Tokens manually.
-                
-                final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]
-                
-                # Labels corresponding to inputs
                 instruction_label = [-100] * len(instruction_token)
                 final_label = instruction_label + [-100] + [-100] + image_labels + [-100] + [-100]
                 
@@ -848,7 +834,7 @@ class Solver(FinetuneSolverBase):
                         "train/loss": avg_loss,
                         "train/lr": self.optimizer.param_groups[0]["lr"],
                         "train/global_step": self.global_step,
-                        "train/epoch": epoch + (data_iter_step / len(self.dataloader_train))
+                        "train/epoch": epoch
                      })
                      accumulated_loss = 0.0 # Reset accumulator
                 print(f"global step --- {self.global_step}")
