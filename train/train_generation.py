@@ -38,7 +38,8 @@ import xllmx.util.misc as misc
 from fairscale.nn.model_parallel import initialize as fs_init
 
 # Image Utils
-from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line
+from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line, decode_vq_to_image, calculate_vq_params
+from generators.image_generation_generator import generate_image
 
 # ==============================================================================
 # 1. Special Tokens Global Definition
@@ -105,8 +106,7 @@ class ItemProcessorGeneration(ItemProcessorBase):
         # Expected format: {'image': PIL.Image, 'text': str} or {'image': ..., 'caption': ...}
         image = data_item.get('image')
         
-        # Try finding the text column
-        text_keys = ['text', 'caption', 'prompt', 'instruction']
+        text_keys = [ 'descriptions', 'text', 'caption', 'prompt']
         caption = ""
         for k in text_keys:
             if k in data_item:
@@ -185,11 +185,11 @@ class Solver(FinetuneSolverBase):
         
         # #agent edited: [5] LoRA Arguments
         parser.add_argument("--use_lora", action="store_true", help="Enable LoRA fine-tuning")
-        parser.add_argument("--lora_rank", type=int, default=8, help="LoRA Rank")
+        parser.add_argument("--lora_rank", type=int, default=128, help="LoRA Rank")
         parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA Alpha")
         parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA Dropout")
         parser.add_argument("--lora_target_modules", nargs='+', default=["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"], help="Target modules for LoRA")
-
+        parser.add_argument("--validation_interval", type=int, default=10, help="Validation interval in steps")
         return parser
     
     def setup_fsdp_sync(
@@ -256,7 +256,134 @@ class Solver(FinetuneSolverBase):
             )
 
     def build_model(self):
-        model, tokenizer, _ = super().build_model()
+        # Full override of build_model to handle LoRA freezing correctly without relying on FinetuneSolverBase's logic
+        init_from = self.args.resume_path or self.args.init_from
+        
+        if init_from is None:
+            starting_point_path = Path(self.args.output_dir) / "starting_point"
+            if dist.get_rank() == 0:
+                if (starting_point_path / "config.json").exists():
+                    self.logger.info(f"will use existing starting point at {starting_point_path}")
+                else:
+                    self.logger.info(f"creating starting-point weights at {starting_point_path}")
+                    self._make_and_save_starting_point(save_path=str(starting_point_path))
+            dist.barrier()
+            init_from = str(starting_point_path)
+
+        self.logger.info(f"Start instantiating unwrapped model from {init_from}")
+        
+        # 1. Instantiate Model (and apply LoRA if enabled)
+        unwrapped_model, tokenizer = self._model_func(init_from)
+
+        # 2. Handle Trainable Parameters (Freezing Logic)
+        if self.args.use_lora:
+            # LoRA handles freezing internally in _model_func (get_peft_model), so we just log.
+            # Ensure we don't accidentally unfreeze everything.
+            from xllmx.util.tensor_type import promote_param_to_fp32
+            
+            # Explicitly ensure only LoRA params are trainable (double check)
+            # and promote trainable params to fp32 if needed (though BF16 training usually keeps them BF16)
+            # Actually, standard practice for LoRA is mixed precision. 
+            # If args.precision is bf16, we usually keep LoRA in bf16 or fp32.
+            
+            # print_param_status will be called later to verify.
+            pass 
+        else:
+            # Original Logic for Full Finetune
+            from xllmx.util.tensor_type import promote_param_to_fp32
+            if hasattr(unwrapped_model, "get_trainable_params"):
+                trainable_params = dict(unwrapped_model.get_trainable_params())
+                for key, param in unwrapped_model.named_parameters():
+                    if key in trainable_params:
+                        param.requires_grad = True
+                        promote_param_to_fp32(param)
+                    else:
+                        param.requires_grad = False
+                        keep_fp32_keywords = ["norm", "lm_head", "embed_tokens"]
+                        if any([_ in key for _ in keep_fp32_keywords]):
+                            promote_param_to_fp32(param)
+                        elif param.is_floating_point():
+                            param.data = param.data.to(self.mixed_precision_dtype)
+            else:
+                # Default: All Trainable
+                self.logger.warning(
+                    f"model class {type(unwrapped_model)} does not have `get_trainable_params` method,"
+                    f"set all params to trainable"
+                )
+                for key, param in unwrapped_model.named_parameters():
+                    param.requires_grad = True
+                    promote_param_to_fp32(param)
+
+        self.logger.info("Finish instantiating unwrapped model.")
+        
+        misc.mark_mp_params(unwrapped_model)
+        # misc.print_param_status(unwrapped_model)
+        
+        # =======================================================
+        # total trainable params
+        # =======================================================
+        train_param_count_local, train_param_count_all = 0, 0
+        frozen_param_count_local, frozen_param_count_all = 0, 0
+        for name, param in unwrapped_model.named_parameters():
+            model_parallel = getattr(param, "model_parallel", False)
+            if param.requires_grad:
+                if model_parallel:
+                    train_param_count_all += param.numel() * fs_init.get_model_parallel_world_size()
+                else:
+                    train_param_count_all += param.numel()
+                train_param_count_local += param.numel()
+            else:
+                if model_parallel:
+                    frozen_param_count_all += param.numel() * fs_init.get_model_parallel_world_size()
+                else:
+                    frozen_param_count_all += param.numel()
+                frozen_param_count_local += param.numel()
+        self.logger.info(
+            f"Trainable parameter count : {train_param_count_local} (local rank), {train_param_count_all} (all).\n"
+            f"Frozen parameter count : {frozen_param_count_local} (local rank), {frozen_param_count_all} (all)."
+            f"Trainable ratio: {train_param_count_all / (train_param_count_all + frozen_param_count_all)*100:.6f}%"
+        )
+
+
+        # 3. Checkpointing (Part 1)
+        if self.args.checkpointing:
+            checkpointing_list = unwrapped_model.get_checkpointing_wrap_module_list() if hasattr(unwrapped_model, 'get_checkpointing_wrap_module_list') else []
+        else:
+            checkpointing_list = []
+
+        # 4. FSDP Wrapping
+        model = self.setup_fsdp_sync(
+            unwrapped_model, self.args.data_parallel, self.args.precision, self.args.grad_precision
+        )
+
+        # broadcast non-model-parallel parameters within model parallel group
+        misc.broadcast_nonmp_parameters(model)
+
+        # 5. Checkpointing (Part 2)
+        if self.args.checkpointing:
+            print("apply gradient checkpointing")
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl, apply_activation_checkpointing, checkpoint_wrapper
+            )
+            non_reentrant_wrapper = functools.partial(
+                checkpoint_wrapper,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            )
+            
+            # Helper to check if module is in the list
+            # For LoRA, the structure might change, so we might need a more robust check.
+            # But get_checkpointing_wrap_module_list returns actual module objects, so it should work if they persist.
+            def check_fn(submodule):
+                return submodule in checkpointing_list
+
+            apply_activation_checkpointing(
+                model,
+                checkpoint_wrapper_fn=non_reentrant_wrapper,
+                check_fn=check_fn,
+            )
+
+        self.logger.info(f"Wrapped model: \n{str(model)}")
+
         
         # Optimizer Setup
         try:
@@ -344,6 +471,144 @@ class Solver(FinetuneSolverBase):
         tokenizer.save_pretrained(save_path)
         print("[Solver] Starting point saved.")
 
+    def _setup_validation_prompts(self):
+        # All ranks should run this to have consistent prompts for FSDP generation
+        if self.global_rank == 0:
+            print(f"[Solver] Setting up validation prompts from {self.args.dataset_name}...")
+        
+        try:
+            # Try loading validation split
+            val_ds = load_dataset(self.args.dataset_name, split="validation")
+        except Exception:
+            try:
+                if self.global_rank == 0: print("[Solver] Validation split not found, trying 'test' split...")
+                val_ds = load_dataset(self.args.dataset_name, split="test")
+            except Exception:
+                if self.global_rank == 0: print("[Solver] Test split not found, falling back to 'train' split.")
+                val_ds = load_dataset(self.args.dataset_name, split="train")
+
+        # Sample 10 random indices with fixed seed for consistency
+        rng = random.Random(42) 
+        indices = rng.sample(range(len(val_ds)), min(3, len(val_ds)))
+        
+        self.validation_prompts = []
+        text_keys = ['descriptions', 'text', 'caption', 'prompt']
+        
+        for idx in indices:
+            item = val_ds[idx]
+            caption = ""
+            for k in text_keys:
+                if k in item:
+                    val = item[k]
+                    if isinstance(val, list):
+                         caption = val[0]
+                    else:
+                         caption = val
+                    break
+            if not caption:
+                caption = "Generate an image."
+            self.validation_prompts.append(caption)
+            
+        if self.global_rank == 0:
+            print(f"[Solver] Selected {len(self.validation_prompts)} validation prompts:")
+            for i, p in enumerate(self.validation_prompts):
+                print(f"  {i+1}. {p}")
+        
+        # save validation prompts to output_dir for reference
+        if self.global_rank == 0:
+            with open(os.path.join(self.args.output_dir, "validation_prompts.txt"), "w", encoding="utf-8") as f:
+                for p in self.validation_prompts:
+                    f.write(p + "\n")
+        dist.barrier() # Ensure all ranks are ready before moving on
+
+    @torch.no_grad()
+    def log_validation_images(self, step):
+        # All ranks must participate because model(infer=True) inside generate_image 
+        # uses collective communication (FSDP).
+        
+        if not hasattr(self, 'validation_prompts'):
+             self._setup_validation_prompts()
+             # Distribute prompts to all ranks so they all know what to generate
+             # (Simplified: since we used fixed seed in _setup_validation_prompts, all ranks should have same prompts if they all called it)
+        
+        # Ensure all ranks call _setup_validation_prompts if they don't have it
+        # Actually, in _setup_validation_prompts I had 'if self.global_rank != 0: return'. 
+        # I should change that so all ranks have the same fixed prompts.
+        
+        print(f"[Rank {self.global_rank}] [Validation] Generating images at step {step}...")
+        self.model.eval()
+        
+        prompts = self.validation_prompts
+        
+        images = []
+        for prompt in prompts:
+            system_prompt = "Generate an image according to the text prompt."
+            instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
+            
+            # Prepare Input
+            instruction_ids = self.tokenizer(instruction, return_tensors="pt").input_ids.to("cuda")
+            if instruction_ids[0, -1] == self.tokenizer.eos_token_id:
+                instruction_ids = instruction_ids[:, :-1]
+                
+            input_ids = torch.cat([
+                instruction_ids,
+                torch.tensor([[BOA, BOI]], device="cuda")
+            ], dim=1)
+            
+            code_start = input_ids.shape[1]
+            
+            # Append MASK tokens for generation
+            _, _, h_grid, w_grid = calculate_vq_params(self.args.image_size, self.args.image_size)
+            mask_tokens = [MASK] * (h_grid * w_grid)
+            mask_with_breaks = add_break_line(mask_tokens, h_grid, w_grid, NEW_LINE)
+            
+            # Add MASKs + EOI + EOA
+            input_ids = torch.cat([
+                input_ids,
+                torch.tensor([mask_with_breaks + [EOI, EOA]], device="cuda")
+            ], dim=1)
+            
+            # Unconditional ids: try to match instruction format but with empty/generic user
+            uncon_instruction = f"<system>{system_prompt}</system><user></user>"
+            uncon_ids = self.tokenizer(uncon_instruction, return_tensors="pt").input_ids.to("cuda")
+            if uncon_ids[0, -1] == self.tokenizer.eos_token_id:
+                uncon_ids = uncon_ids[:, :-1]
+            uncon_ids = torch.cat([uncon_ids, torch.tensor([[BOA, BOI]], device="cuda")], dim=1)
+
+            try:
+                # Generate (All ranks participate)
+                out_tokens = generate_image(
+                    self.model,
+                    input_ids,
+                    uncon_ids=uncon_ids,
+                    code_start=code_start,
+                    cfg_scale=4.0,
+                    timesteps=64,
+                    mask_token_id=MASK,
+                    newline_id=NEW_LINE
+                )
+                
+                # Only rank 0 decodes and prepares WandB image
+                if self.global_rank == 0:
+                    img = decode_vq_to_image(
+                        out_tokens, 
+                        save_path=None, 
+                        vae_ckpt=None, 
+                        image_height=self.args.image_size, 
+                        image_width=self.args.image_size, 
+                        vqvae=self.vqvae
+                    )
+                    images.append(wandb.Image(img, caption=prompt))
+                
+            except Exception as e:
+                print(f"[Rank {self.global_rank}] [Validation] Error generating image for prompt '{prompt}': {e}")
+        
+        if self.global_rank == 0 and self.args.use_wandb and images:
+            wandb.log({"val/generated_images": images}, step=step)
+            
+        self.model.train()
+        dist.barrier() # Sync after validation
+
     def run(self):
         print("[Solver] Checking model parameters for NaNs...")
         for name, param in self.model.named_parameters():
@@ -363,6 +628,19 @@ class Solver(FinetuneSolverBase):
              self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
              self.vqvae.eval()
 
+        # Initialize global step
+        steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
+        self.global_step = self.start_epoch * steps_per_epoch
+        if self.start_iter > 0:
+            self.global_step += self.start_iter // self.args.accum_iter
+        print(f"[Solver] Starting from Global Step: {self.global_step}")
+
+        # Setup Validation Prompts
+        self._setup_validation_prompts()
+
+        # Initial validation logging to verify it works
+        self.log_validation_images(self.global_step)
+
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()
         for epoch in range(self.start_epoch, self.args.epochs):
@@ -376,16 +654,9 @@ class Solver(FinetuneSolverBase):
             )
 
             if epoch % self.args.save_interval == 0 or epoch + 1 == self.args.epochs:
-                util.ckpt.save(
-                    self.args.output_dir,
-                    self.global_rank == 0,
-                    self.model,
-                    self.optimizer,
-                    self.tokenizer,
-                    self.args,
-                    epoch=epoch,
-                    max_keep=self.args.ckpt_max_keep,
-                )
+                 # Check if we just saved to avoid double saving
+                 if self.global_step % self.args.save_iteration_interval != 0:
+                    self.save_checkpoint(epoch=epoch)
 
             log_stats = {**{f"train_{k}": v for k, v in train_stats.items()}, "epoch": epoch}
 
@@ -409,6 +680,57 @@ class Solver(FinetuneSolverBase):
             wandb.finish()
 
 
+    def save_checkpoint(self, epoch, iteration=None, global_step=None):
+        print(f"[Solver] Saving checkpoint at global step {self.global_step}")
+        # save where
+        print(f"[Solver] Checkpoint output dir: {self.args.output_dir}")
+        
+        # Check if FSDP or regular model
+        is_fsdp = isinstance(self.model, FSDP)
+        
+        if is_fsdp:
+            util.ckpt.save(
+                self.args.output_dir,
+                self.global_rank == 0,
+                self.model,
+                self.optimizer,
+                self.tokenizer,
+                self.args,
+                epoch=epoch,
+                iteration=iteration,
+                global_step=global_step,
+                max_keep=self.args.ckpt_max_keep,
+            )
+        else:
+            # Handle Non-FSDP / LoRA Saving
+            if self.global_rank == 0:
+                save_name = f"epoch{epoch}"
+                if iteration is not None:
+                    save_name += f"-iter{iteration}"
+                if global_step is not None:
+                    save_name += f"-step{global_step}"
+                save_dir = os.path.join(self.args.output_dir, save_name)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                if self.args.use_lora:
+                    # Save Adapter Only
+                    self.model.save_pretrained(save_dir)
+                    print(f"[Solver] Saved LoRA adapter to {save_dir}")
+                else:
+                    # Save Full Model
+                    torch.save(self.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+                    print(f"[Solver] Saved full model to {save_dir}")
+                
+                # Save Tokenizer and Args
+                self.tokenizer.save_pretrained(save_dir)
+                with open(os.path.join(save_dir, "args.json"), "w") as f:
+                    json.dump(vars(self.args), f, indent=2)
+                
+                # Handle rotation (remove old checkpoints)
+                util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
+        
+        dist.barrier() # Sync
+
     def train_one_epoch(self, epoch: int, start_iter: int, log_writer=None, metric_logger=None):
         if not hasattr(self, 'vqvae'):
             # VQ-VAE loading logic (redundant safety)
@@ -426,7 +748,7 @@ class Solver(FinetuneSolverBase):
         accum_iter = self.args.accum_iter
 
         self.optimizer.zero_grad()
-
+        accumulated_loss = 0.0 
         for data_iter_step, batch_data in enumerate(
             metric_logger.log_every(
                 self.dataloader_train,
@@ -437,8 +759,6 @@ class Solver(FinetuneSolverBase):
             ),
             start=start_iter,
         ):
-            # images_tuple: (img1, img2, ...)
-            # captions_tuple: (str1, str2, ...)
             images_tuple, captions_tuple = batch_data
             
             input_ids_list = []
@@ -488,10 +808,6 @@ class Solver(FinetuneSolverBase):
             examples = input_ids_list
             labels = labels_list
             
-            lr_sched.adjust_learning_rate_epoch(
-                self.optimizer, data_iter_step / len(self.dataloader_train) + epoch, self.args
-            )
-
             with {
                 "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
                 "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
@@ -502,6 +818,8 @@ class Solver(FinetuneSolverBase):
 
             loss = c_loss
             loss_value = loss.item()
+            accumulated_loss += loss_value # Accumulate loss
+
 
             if not math.isfinite(loss_value):
                 print(f"[Rank {self.global_rank}] Loss is {loss_value}, stopping training")
@@ -510,14 +828,51 @@ class Solver(FinetuneSolverBase):
             effective_loss = loss / accum_iter
             effective_loss.backward()
 
+            # Gradient Accumulation Step
             if (data_iter_step + 1) % accum_iter == 0:
-                self.model.clip_grad_norm_(max_norm=self.args.clip_grad)
+                if isinstance(self.model, FSDP):
+                    self.model.clip_grad_norm_(max_norm=self.args.clip_grad)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.args.clip_grad)
+                
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
+                
+                # Increment Global Step
+                self.global_step += 1
+
+                # --- WandB Logging per Step ---
+                if self.global_rank == 0 and self.args.use_wandb:
+                     avg_loss = accumulated_loss / accum_iter
+                     wandb.log({
+                        "train/loss": avg_loss,
+                        "train/lr": self.optimizer.param_groups[0]["lr"],
+                        "train/global_step": self.global_step,
+                        "train/epoch": epoch + (data_iter_step / len(self.dataloader_train))
+                     })
+                     accumulated_loss = 0.0 # Reset accumulator
+                print(f"global step --- {self.global_step}")
+                if self.global_step % self.args.validation_interval == 0 and self.args.use_wandb:
+                    print("[Solver] Logging validation images on wandb...")
+                    self.log_validation_images(self.global_step)
+
+                # --- Step-based Saving ---
+                if self.global_step % self.args.save_iteration_interval == 0:
+                     self.save_checkpoint(epoch, iteration=data_iter_step, global_step=self.global_step)
 
             torch.cuda.synchronize()
             metric_logger.update(loss=loss_value)
             metric_logger.update(lr=self.optimizer.param_groups[0]["lr"])
+
+            # if self.global_rank == 0:
+            #     if self.args.use_wandb:
+            #         wandb.log({
+            #             "train/loss": loss_value,
+            #             "train/lr": self.optimizer.param_groups[0]["lr"],
+            #             "train/epoch": epoch + data_iter_step / len(self.dataloader_train),
+            #         }, step=data_iter_step + len(self.dataloader_train) * epoch)
+            #         if (data_iter_step + 1) % accum_iter == 0:
+            #              wandb.log({"train/grad_norm": grad_norm}, step=data_iter_step + len(self.dataloader_train) * epoch)
 
         metric_logger.synchronize_between_processes()
         print(f"Averaged stats: {metric_logger}")
@@ -525,5 +880,6 @@ class Solver(FinetuneSolverBase):
 
 if __name__ == "__main__":
     args = Solver.get_args_parser().parse_args()
+    util.misc.random_seed(42)
     solver = Solver(args)
     solver.run()

@@ -7,7 +7,7 @@ import math
 from typing import Callable, Optional
 from utils.generation_utils import cosine_schedule, gumbel_max_sample, mask_by_random_topk
 from model import LLaDAForMultiModalGeneration
-
+from tqdm import tqdm
 
 @torch.no_grad()
 def generate_image(
@@ -84,7 +84,8 @@ def generate_image(
         text_vocab_size = vocab_total - codebook_size
     vocab_offset = text_vocab_size
 
-    for step in range(timesteps):
+    # add tqdm progress bar for generation steps here
+    for step in tqdm(range(timesteps)):
         if unknown_cnt.item() == 0:
             break
 
