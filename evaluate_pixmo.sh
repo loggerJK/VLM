@@ -1,23 +1,26 @@
-#!/bin/bash
-set -e
-
-# Activate conda environment
-unset PYTHONPATH
-source /home/work/.project/anaconda3/etc/profile.d/conda.sh
-conda activate lumina_dimoo
-export PYTHONNOUSERSITE=1
-
-# Output directory
-output_dir="output/pixmo_count_evaluation_len20"
-mkdir -p "$output_dir"
-
-echo "Starting evaluation..."
-echo "Output Directory: $output_dir"
-
-python evaluate_pixmo.py \
-    --checkpoint /home/work/.project/jiwon/lumina_dimoo/output/Lumina-DiMOO-pointing-full/epoch0-iter31999 \
+CUDA_VISIBLE_DEVICES=2 python evaluate_pixmo.py \
+    --checkpoint Alpha-VLLM/Lumina-DiMOO \
+    --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+    --lora_ckpt_path /mnt/data1/jiwon/Lumina-DiMOO/output/Lumina-DiMOO-counting-lora128/epoch0-iter63999-step1000 \
+    --output_dir ./evaluation_results/lora128_counting \
     --steps 20 \
     --gen_length 20 \
-    --block_length 20 \
+    --block_length 20 
+
+CUDA_VISIBLE_DEVICES=6 python evaluate_pixmo.py \
+    --checkpoint Alpha-VLLM/Lumina-DiMOO \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --output_dir "$output_dir" 2>&1 | tee "$output_dir/evaluation.log"
+    --output_dir ./evaluation_results/baseline \
+    --steps 20 \
+    --gen_length 20 \
+    --block_length 20 
+
+CUDA_VISIBLE_DEVICES=7 python evaluate_pixmo.py \
+    --checkpoint Alpha-VLLM/Lumina-DiMOO \
+    --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+    --lora_ckpt_path /mnt/data1/jiwon/Lumina-DiMOO/output/lora128_counting_wohead/epoch0-iter31999-step1000 \
+    --output_dir ./evaluation_results/lora128_counting_wohead \
+    --steps 20 \
+    --gen_length 20 \
+    --block_length 20 
+

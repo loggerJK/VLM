@@ -512,15 +512,16 @@ class Solver(FinetuneSolverBase):
             train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
         # Validation Dataset (Map-style) - Stored in self.val_ds
-        if LOCAL_VAL_DIR and os.path.exists(LOCAL_VAL_DIR):
-            from datasets import load_from_disk
-            self.val_ds = load_from_disk(os.path.join(LOCAL_VAL_DIR, "validation"))
-            # Limit to 100 for speed if needed, or keep full
-            if len(self.val_ds) > 100:
-                self.val_ds = self.val_ds.select(range(100))
-        else:
-            # Load only first 100 samples
-            self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
+        # if LOCAL_VAL_DIR and os.path.exists(LOCAL_VAL_DIR):
+        #     from datasets import load_from_disk
+        #     self.val_ds = load_from_disk(os.path.join(LOCAL_VAL_DIR, "validation"))
+        #     # Limit to 100 for speed if needed, or keep full
+        #     if len(self.val_ds) > 100:
+        #         self.val_ds = self.val_ds.select(range(100))
+        # else:
+        #     # Load only first 100 samples
+        #     self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
+        self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
         return HFDatasetWrapper(train_ds, item_processor, default_task=self.args.task)
@@ -551,6 +552,10 @@ class Solver(FinetuneSolverBase):
     @torch.no_grad()
     def validate(self, epoch, format="counting"):
         dist.barrier() # Sync before validation
+        
+        local_rank = dist.get_rank() 
+        world_size = dist.get_world_size()
+        # local_device =  torch.device(f"cuda:{local_rank}")
         
         # Turn off lora
         # self.model.disable_adapter_layers() if self.args.use_lora else None
@@ -584,6 +589,16 @@ class Solver(FinetuneSolverBase):
         gt_counts = []
         pred_counts = []
         
+        local_dataset_list = []
+        count = 0
+        for _item in eval_dataset:
+            if count % world_size == local_rank:
+                local_dataset_list.append(_item)
+            count += 1
+            if count >= eval_limit:
+                break
+        
+        
         # WandB Table
         if self.val_table is None and self.args.use_wandb and self.global_rank == 0:
             self.val_table = wandb.Table(columns=["Step", "Accuracy", "Details"])
@@ -592,9 +607,9 @@ class Solver(FinetuneSolverBase):
             count = 0
             # Only rank 0 shows progress bar to avoid clutter
             disable_tqdm = (self.global_rank != 0)
-            progress = tqdm(range(eval_limit), desc="Validation", unit="sample", disable=disable_tqdm)
+            progress = tqdm(range(len(local_dataset_list)), desc="Validation", unit="sample", disable=disable_tqdm)
             
-            for item in eval_dataset:
+            for item in local_dataset_list:
                 if count >= eval_limit:
                     break
                 
@@ -636,16 +651,18 @@ class Solver(FinetuneSolverBase):
                 
                 # Prepare Generation Input
                 code_start = len(input_token) + 1
-                GEN_LENGTH= 20 if format == "counting" else 400
+                STEPS_LENGTH= 20 if format == "counting" else 128
+                GEN_LENGTH= 20 if format == "counting" else 512
+                BLOCK_LENGTH= 20 if format == "counting" else 128
                 input_token = input_token + [BOA] + GEN_LENGTH * [MASK] # gen_length=10 for short answer
                 input_ids = torch.tensor(input_token, device="cuda").unsqueeze(0)
                 
                 # Generate (All ranks must call this!)
                 out_new = generate_text_understanding(
                     self.model, input_ids,
-                    steps=GEN_LENGTH, # reduced steps for validation speed
+                    steps=STEPS_LENGTH, # reduced steps for validation speed
                     gen_length=GEN_LENGTH,
-                    block_length=GEN_LENGTH, # one block
+                    block_length=BLOCK_LENGTH, # one block
                     temperature=0.0,
                     cfg_scale=0.0,
                     remasking='low_confidence',
@@ -682,8 +699,27 @@ class Solver(FinetuneSolverBase):
                     torch.cuda.empty_cache()
             
             progress.close()
+            
+            # Gather 1) pred_counts and 2) gt_counts 3) details_buffer from all ranks to rank 0 for confusion matrix
+            all_pred_counts = [None for _ in range(world_size)] 
+            all_gt_counts = [None for _ in range(world_size)] 
+            all_details_buffer = [None for _ in range(world_size)] 
+
+            dist.barrier()
+            dist.all_gather_object(all_pred_counts, pred_counts)
+            dist.all_gather_object(all_gt_counts, gt_counts)
+            dist.all_gather_object(all_details_buffer, details_buffer)
+            
+            pred_counts = [count for sublist in all_pred_counts for count in sublist] 
+            gt_counts = [count for sublist in all_gt_counts for count in sublist]
+            details_buffer = [detail for sublist in all_details_buffer for detail in sublist]
                     
             if self.global_rank == 0:
+                # Calculate Accuracy
+                total = len(gt_counts)
+                correct = sum(1 for g, p in zip(gt_counts, pred_counts) if g == p and p >= 0)
+                
+                
                 accuracy = correct / total if total > 0 else 0
                 
                 # Calculate Mean Average Deviation

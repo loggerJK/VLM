@@ -37,6 +37,34 @@ def set_all_seeds(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     set_seed(seed)
+    
+
+def extract_number_fixed(text):
+    """Extract number from text pattern **number**, number, or English words (zero-nine)."""
+    text = text.lower()
+    
+    # 1. Try **number**
+    match = re.search(r"\*\*(\d+)\*\*", text)
+    if match:
+        return int(match.group(1))
+    
+    # 2. Try English words (zero to nine)
+    word_to_num = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10
+    }
+    for word, num in word_to_num.items():
+        # Match whole word to avoid partial matches (e.g. 'one' in 'bone')
+        if re.search(r"\b" + word + r"\b", text):
+            return num
+
+    # 3. Try plain digits
+    match = re.search(r"(\d+)", text)
+    if match:
+        return int(match.group(1))
+        
+    return -1
 
 def extract_number(text):
     # Try to find **<number>** pattern
@@ -61,6 +89,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.0, help="Temperature")
     parser.add_argument("--block_length", type=int, default=256, help="Block length")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--lora_ckpt_path", type=str, default=None, help="LoRA checkpoint path (if any)")
 
     args = parser.parse_args()
 
@@ -83,6 +112,9 @@ def main():
     model = LLaDAForMultiModalGeneration.from_pretrained(
         args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto",
     )
+    if args.lora_ckpt_path:
+        print(f"Loading LoRA weights from {args.lora_ckpt_path}...")
+        model.load_adapter(args.lora_ckpt_path)
     vqvae = VQModel.from_pretrained(args.vae_ckpt, subfolder="vqvae").to(device)
     
     # Special Tokens
@@ -98,13 +130,12 @@ def main():
     results = []
 
     print("Starting inference...")
-    # Streaming dataset may not have length, so we iterate without total or set a max limit if needed
-    for i, item in tqdm(enumerate(dataset), desc="Evaluating"):
-        if i >= 1000: # Safety break for testing, can be increased or removed
-             break
+    iterable_dataset = dataset
+    for i, item in tqdm(enumerate(iterable_dataset), total=501):
         image = item['image']
         question = item['question']
         gt_answer = item['answer']
+        question = question.replace('**<number>** of', '**<number>**')
         
         # Ground Truth
         gt_num = extract_number(gt_answer)
@@ -147,7 +178,7 @@ def main():
         code_start = len(input_token) + 1
         
         # Mask Sequence
-        input_token = input_token + [BOA] + args.gen_length*[MASK] + [EOA] 
+        input_token = input_token + [BOA] + args.gen_length*[MASK]
         #  EOA = <\answer> 
         input_ids_tensor = torch.tensor(input_token, device=device).unsqueeze(0)
         
@@ -167,7 +198,7 @@ def main():
             skip_special_tokens=True
         )[0]
         print(text_new)
-        pred_num = extract_number(text_new)
+        pred_num = extract_number_fixed(text_new)
         
         true_labels.append(gt_num)
         pred_labels.append(pred_num)
