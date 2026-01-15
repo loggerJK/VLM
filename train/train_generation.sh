@@ -1,7 +1,7 @@
 #!/bin/bash
 # set -e
 # Default GPU
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=3,4
 export PYTHONNOUSERSITE=1
 export WANDB_API_KEY=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
 export WANDB_PROJECT=lumina-generation-debug    

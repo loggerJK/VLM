@@ -189,8 +189,6 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--lora_target_modules", nargs='+', default=["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"], help="Target modules for LoRA")
         parser.add_argument("--validation_interval", type=int, default=10, help="Validation interval in steps")
 
-        # save checkpoint every N steps
-        parser.add_argument("--save_iteration_interval", type=int, default=1000, help="Save checkpoint every N iterations")
         return parser
     
     def setup_fsdp_sync(
