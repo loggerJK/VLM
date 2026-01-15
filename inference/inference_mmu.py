@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from config import SPECIAL_TOKENS
 from model import LLaDAForMultiModalGeneration
-from utils.image_utils import preprocess_image, encode_img_with_breaks, calculate_vq_params, generate_crop_size_list, var_center_crop, add_break_line
+from utils.image_utils import preprocess_image, encode_img_with_breaks, calculate_vq_params, generate_crop_size_list, var_center_crop, add_break_line, encode_img_with_breaks_fixed
 from generators.text_understanding_generator import generate_text_understanding
 from utils.prompt_utils import generate_multimodal_understanding_prompt
 
@@ -47,10 +47,19 @@ def main():
     
     # Load model and tokenizer
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.vae_ckpt, trust_remote_code=True)
+    # if os.path.exists(args.checkpoint):
+    #     print("Loading model from local checkpoint: ", args.checkpoint)
+    #     base_config = AutoConfig.from_pretrained(args.checkpoint, trust_remote_code=True)
+    #     # Load model with correct config
+    #     model = LLaDAForMultiModalGeneration(base_config)
+    # else:
     model = LLaDAForMultiModalGeneration.from_pretrained(
         args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto",
     )
+        
+    model.to(device)
+    
     
     # Load VQ-VAE
     from diffusers import VQModel
@@ -80,12 +89,17 @@ def main():
         image_height, image_width, vae_scale
     )
     
-    # Encode image
-    input_img_token = encode_img_with_breaks(image, vqvae=vqvae)
+    ##### 기존  코드 #####
+    # # Encode image
+    # input_img_token = encode_img_with_breaks(image, vqvae=vqvae)
 
-    # Build input image token
-    img_token = add_break_line(input_img_token, token_grid_height, token_grid_width, new_number = NEW_LINE)
-    input_img_token = img_token
+    # # Build input image token
+    # img_token = add_break_line(input_img_token, token_grid_height, token_grid_width, new_number = NEW_LINE)
+    # input_img_token = img_token
+    
+    input_img_token, (H, W) = encode_img_with_breaks_fixed(image, vqvae)
+    img_token = add_break_line(input_img_token[1:-1], H, W,new_number=NEW_LINE)
+    img_token = [BOI] + img_token + [EOI]  # add BOI, EOI
 
     # Build input sequence
     input_token = input_ids[:-1] + input_img_token + input_ids[-1:]
@@ -94,8 +108,8 @@ def main():
     code_start = len(input_token) + 1 
 
     # Build text mask predition sequence
-    input_token = input_token + [BOA] + args.gen_length*[MASK] + [EOA]
-    input_ids = torch.tensor(input_token, device=device).unsqueeze(0)
+    input_token = input_token + [BOA] + args.gen_length*[MASK] #+ [EOA]
+    input_ids = torch.tensor(input_token, device=device).unsqueeze(0).to(device)
     
     # Generate text
     start_time = time.time()
@@ -111,15 +125,21 @@ def main():
     )
 
     text_new = tokenizer.batch_decode(
-        out_new[:, code_start : -1], 
-        skip_special_tokens=True
+        out_new[:, code_start:], 
+        skip_special_tokens=False
     )[0]
 
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"[✓] (Time {elapsed_time:.2f}s)")
     
-    print(f"Generated text: {text_new}")
+    print(f"skip_special_tokens=False: {text_new}")
+    
+    text_new = tokenizer.batch_decode(    out_new[:, code_start:-1],     skip_special_tokens=True)[0]
+    
+    print(f"skip_special_tokens=True: {text_new}")
+    
+    import pdb; pdb.set_trace()
 
 
 if __name__ == '__main__':

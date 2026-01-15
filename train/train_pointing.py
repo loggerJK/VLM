@@ -300,7 +300,7 @@ class Solver(FinetuneSolverBase):
                 entity=self.args.wandb_entity,
                 name=self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
                 config=vars(self.args),
-                mode="online"
+                # mode="online"
             )
         self.val_table = None
         self.global_step = 0
@@ -580,7 +580,7 @@ class Solver(FinetuneSolverBase):
 
         correct = 0
         total = 0
-        eval_limit = 100 
+        eval_limit = 100
         
         # All ranks iterate, but effectively they process the same data if not sharded. 
         # For FSDP generation, they MUST run the same inputs to keep internal states synced.
@@ -590,13 +590,12 @@ class Solver(FinetuneSolverBase):
         pred_counts = []
         
         local_dataset_list = []
-        count = 0
-        for _item in eval_dataset:
-            if count % world_size == local_rank:
-                local_dataset_list.append(_item)
-            count += 1
-            if count >= eval_limit:
+        for i, _item in enumerate(eval_dataset):
+            if i >= eval_limit:
                 break
+            if i % world_size == local_rank:
+                # print(f"[Rank {local_rank}] Adding sample {i} to local eval set.")
+                local_dataset_list.append(_item)
         
         
         # WandB Table
@@ -610,8 +609,8 @@ class Solver(FinetuneSolverBase):
             progress = tqdm(range(len(local_dataset_list)), desc="Validation", unit="sample", disable=disable_tqdm)
             
             for item in local_dataset_list:
-                if count >= eval_limit:
-                    break
+                # if count >= eval_limit:
+                #     break
                 
                 image = item.get('image')
                 question = item.get('question', '')
@@ -669,26 +668,24 @@ class Solver(FinetuneSolverBase):
                     code_start=code_start
                 )
                 
-                # Only Rank 0 processes results for logging
-                if self.global_rank == 0:
-                    answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
-                    pred_count = extract_number_fixed(answer)
-                    
-                    gt_count_val = int(gt_count)
-                    pred_count_val = int(pred_count)
-                    is_correct = bool(pred_count_val == gt_count_val)
-                    
-                    gt_counts.append(gt_count_val)
-                    pred_counts.append(pred_count_val)
+                answer = self.tokenizer.batch_decode(out_new[:, code_start:], skip_special_tokens=True)[0]
+                pred_count = extract_number_fixed(answer)
+                
+                gt_count_val = int(gt_count)
+                pred_count_val = int(pred_count)
+                is_correct = bool(pred_count_val == gt_count_val)
+                
+                gt_counts.append(gt_count_val)
+                pred_counts.append(pred_count_val)
 
-                    if is_correct:
-                        correct += 1
-                    total += 1
-                    
-                    res_str = f"\n[{count + 1}] \nQuestion: {question} \nGT: {gt_count_val} \nPred: {pred_count_val} \nCorrect: {is_correct} \nAns: {answer}"
-                    print(res_str)
-                    print("-" * 50)
-                    details_buffer.append(res_str)
+                if is_correct:
+                    correct += 1
+                total += 1
+                
+                res_str = f"\n[{count + 1}] \nQuestion: {question} \nGT: {gt_count_val} \nPred: {pred_count_val} \nCorrect: {is_correct} \nAns: {answer}"
+                print(res_str)
+                print("-" * 50)
+                details_buffer.append(res_str)
                 
                 count += 1
                 progress.update(1)
@@ -710,15 +707,24 @@ class Solver(FinetuneSolverBase):
             dist.all_gather_object(all_gt_counts, gt_counts)
             dist.all_gather_object(all_details_buffer, details_buffer)
             
+            # if self.global_rank == 0:
+            #     print(f"all_pred_counts: {all_pred_counts}")
+            #     print(f"all_gt_counts: {all_gt_counts}")
+            #     print(f"all_details_buffer: {all_details_buffer}")
+            
             pred_counts = [count for sublist in all_pred_counts for count in sublist] 
             gt_counts = [count for sublist in all_gt_counts for count in sublist]
             details_buffer = [detail for sublist in all_details_buffer for detail in sublist]
+            
+            # if self.global_rank == 0:
+            #     print(f"pred_counts gathered:\n {pred_counts}")
+            #     print(f"gt_counts gathered:\n {gt_counts}")
+            #     print(f"details_buffer gathered:\n {details_buffer}")
                     
             if self.global_rank == 0:
                 # Calculate Accuracy
                 total = len(gt_counts)
                 correct = sum(1 for g, p in zip(gt_counts, pred_counts) if g == p and p >= 0)
-                
                 
                 accuracy = correct / total if total > 0 else 0
                 
