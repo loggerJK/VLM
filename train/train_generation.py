@@ -36,6 +36,7 @@ import xllmx.util as util
 import xllmx.util.lr_sched as lr_sched
 import xllmx.util.misc as misc
 from fairscale.nn.model_parallel import initialize as fs_init
+from diffusers.image_processor import VaeImageProcessor
 
 # Image Utils
 from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line, decode_vq_to_image, calculate_vq_params
@@ -172,7 +173,6 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--image_size", type=int, default=512, help="Image size for preprocessing")
         parser.add_argument("--cpu_offload", action="store_true", help="Enable CPU Offloading for FSDP")
         
-        # #agent edited: [4] Dataset Arguments
         parser.add_argument("--dataset_name", type=str, required=True, help="Hugging Face Dataset Name (e.g. 'lambdalabs/pokemon-blip-captions')")
         parser.add_argument("--dataset_split", type=str, default="train", help="Dataset split to use")
 
@@ -182,13 +182,15 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity name")
         parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name")
         
-        # #agent edited: [5] LoRA Arguments
         parser.add_argument("--use_lora", action="store_true", help="Enable LoRA fine-tuning")
         parser.add_argument("--lora_rank", type=int, default=128, help="LoRA Rank")
         parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA Alpha")
         parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA Dropout")
         parser.add_argument("--lora_target_modules", nargs='+', default=["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"], help="Target modules for LoRA")
         parser.add_argument("--validation_interval", type=int, default=10, help="Validation interval in steps")
+
+        # save checkpoint every N steps
+        parser.add_argument("--save_iteration_interval", type=int, default=1000, help="Save checkpoint every N iterations")
         return parser
     
     def setup_fsdp_sync(
@@ -538,7 +540,8 @@ class Solver(FinetuneSolverBase):
         prompts = self.validation_prompts
         
         images = []
-        for prompt in prompts:
+        for i, prompt in enumerate(prompts):
+            sample_start_time = time.time()
             system_prompt = "Generate an image according to the text prompt."
             instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
             
@@ -596,6 +599,9 @@ class Solver(FinetuneSolverBase):
                         vqvae=self.vqvae
                     )
                     images.append(wandb.Image(img, caption=prompt))
+                    
+                    sample_elapsed_time = time.time() - sample_start_time
+                    print(f"[Rank 0] [Validation] Finished prompt {i+1}/{len(prompts)} (Time: {sample_elapsed_time:.2f}s)")
                 
             except Exception as e:
                 print(f"[Rank {self.global_rank}] [Validation] Error generating image for prompt '{prompt}': {e}")
@@ -766,21 +772,30 @@ class Solver(FinetuneSolverBase):
                 caption = captions_tuple[i]
 
                 with torch.no_grad():
-                    # encode_img_with_breaks returns tokens with newline separator
-                    image_tokens = encode_img_with_breaks(img, self.vqvae)
+                    # 1. Encode Image to get Image Tokens
+                    vae_scale_factor = 2 ** (len(self.vqvae.config.block_out_channels) - 1)
+                    image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
+                    x = image_processor.preprocess(img).to(device=self.vqvae.device, dtype=self.vqvae.dtype)
+                    latents = self.vqvae.encode(x).latents
+                    B, C, H, W = latents.shape
+                    quantized = self.vqvae.quantize(latents)[2][2] + 126356 # Offset
+                    image_tokens_raw = quantized.reshape(B, H, W).flatten().tolist()
                 
-                # 2. Mask Image Tokens (for training target)
-                masked_image_tokens, image_labels = mask_codes(image_tokens)
+                # 2. Mask Image Tokens (Mask FIRST, then add breaks)
+                masked_image_tokens, image_labels = mask_codes(image_tokens_raw)
 
-                # 3. Prepare Prompt (Instruction + User Prompt)
-                # Template: <system>Generate an image according to the text prompt.</system><user>{caption}</user>
+                # 3. Add Break Lines
+                masked_image_tokens = add_break_line(masked_image_tokens, H, W, NEW_LINE)
+                image_labels = add_break_line(image_labels, H, W, -100)
+
+                # 4. Prepare Prompt (Instruction + User Prompt)
                 system_prompt = "Generate an image according to the text prompt."
                 instruction = f"<system>{system_prompt}</system><user>{caption}</user>"
                 
                 instruction_token = self.tokenizer(instruction, truncation=True, max_length=512, padding=False, return_tensors="pt").input_ids[0].tolist()
-                final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]                
-                
                 instruction_label = [-100] * len(instruction_token)
+
+                final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]                
                 final_label = instruction_label + [-100] + [-100] + image_labels + [-100] + [-100]
                 
                 # Truncate if too long

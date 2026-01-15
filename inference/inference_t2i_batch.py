@@ -103,6 +103,7 @@ def main():
     total_start_time = time.time()
 
     for idx, prompt_text in enumerate(tqdm(prompts, desc="Generating Images")):
+        sample_start_time = time.time()
         print(f"\nProcessing [{idx+1}/{len(prompts)}]: {prompt_text}")
         
         # Generate prompts using utility function
@@ -173,7 +174,8 @@ def main():
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(prompt_text)
             
-        print(f"[✓] Saved {save_path}")
+        sample_elapsed_time = time.time() - sample_start_time
+        print(f"[✓] Saved {save_path} (Time: {sample_elapsed_time:.2f}s)")
 
     total_elapsed_time = time.time() - total_start_time
     print(f"\nAll tasks completed in {total_elapsed_time:.2f}s")
