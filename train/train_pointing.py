@@ -63,6 +63,27 @@ PAD = 126339                          # Padding token (not in config.py, from tr
 # 2. Helper Functions
 # ==============================================================================
 
+def parse_checkpoint_name(ckpt_str: str):
+    """
+    Parse epoch, iteration, and global_step from checkpoint directory name.
+    
+    Examples:
+        - "epoch3" -> (3, None, None)
+        - "epoch3-iter120" -> (3, 120, None)
+        - "epoch3-iter120-step450" -> (3, 120, 450)
+    """
+    parts = ckpt_str.split("-")
+    epoch = int(parts[0].replace("epoch", ""))
+    iteration = None
+    global_step = None
+    for part in parts[1:]:
+        if part.startswith("iter"):
+            iteration = int(part.replace("iter", ""))
+        elif part.startswith("step"):
+            global_step = int(part.replace("step", ""))
+    return epoch, iteration, global_step
+
+
 def mask_codes(codes, sch="cosine", mask = False, editing = False):
     """
     Applies masking to the target tokens for Masked Diffusion Loss.
@@ -217,6 +238,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wandb_project", type=str, default="lumina-dimoo-finetune", help="WandB project name")
         parser.add_argument("--wandb_entity", type=str, default=None, help="WandB entity name")
         parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name")
+        parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID for resume")
 
         # LoRA Arguments
         parser.add_argument("--use_lora", action="store_true", help="Enable LoRA training")
@@ -293,17 +315,35 @@ class Solver(FinetuneSolverBase):
         return model
 
     def __init__(self, args):
-        super().__init__(args)
-        if self.args.use_wandb and self.global_rank == 0:
-            wandb.init(
-                project=self.args.wandb_project,
-                entity=self.args.wandb_entity,
-                name=self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                config=vars(self.args),
-                # mode="online"
-            )
-        self.val_table = None
+        # Initialize global_step and val_table BEFORE super().__init__
         self.global_step = 0
+        self.val_table = None
+        
+        super().__init__(args)  # Calls resume() via parent if resume_path is set
+        
+        # Initialize WandB with resume support
+        if self.args.use_wandb and self.global_rank == 0:
+            wandb_kwargs = {
+                "project": self.args.wandb_project,
+                "entity": self.args.wandb_entity,
+                "config": vars(self.args),
+                # "mode": "online"
+            }
+            
+            # If resuming with a run_id, use resume="allow"
+            if self.args.wandb_run_id:
+                wandb_kwargs["id"] = self.args.wandb_run_id
+                wandb_kwargs["resume"] = "allow"
+                wandb_kwargs["name"] = self.args.wandb_run_name  # Can be None
+                self.logger.info(f"[WandB] Resuming run with ID: {self.args.wandb_run_id}")
+            else:
+                wandb_kwargs["name"] = self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            
+            wandb.init(**wandb_kwargs)
+            
+            # Save run_id for future reference
+            if self.args.wandb_run_id is None:
+                self.logger.info(f"[WandB] New run created with ID: {wandb.run.id}")
 
     def build_model(self):
         # Full override of build_model to handle LoRA freezing correctly without relying on FinetuneSolverBase's logic
@@ -446,8 +486,11 @@ class Solver(FinetuneSolverBase):
         return model, tokenizer, optimizer
 
     def _model_func(self, init_from: str) -> (nn.Module, None):
-        tokenizer = AutoTokenizer.from_pretrained(init_from, trust_remote_code=True)
-        
+        """
+        Resume cases:
+        - LoRA resume: Load base model from init_from, then load adapter from resume_path
+        - FSDP resume: Load full model from resume_path via from_pretrained
+        """
         # Determine dtype based on precision arg
         if self.args.precision == "bf16":
             dtype = torch.bfloat16
@@ -455,44 +498,85 @@ class Solver(FinetuneSolverBase):
             dtype = torch.float16
         else:
             dtype = torch.float32
+        
+        tokenizer = AutoTokenizer.from_pretrained(self.args.init_from, trust_remote_code=True)
+        
+        # Check if resuming from LoRA adapter checkpoint
+        is_lora_resume = (
+            self.args.resume_path and 
+            self.args.use_lora and 
+            os.path.exists(os.path.join(self.args.resume_path, "adapter_config.json"))
+        )
+        
+        if is_lora_resume:
+            # Resume LoRA: Load base model from init_from, then load adapter from resume_path
+            self.logger.info(f"[Resume] Loading base model from {self.args.init_from}, adapter from {self.args.resume_path}")
             
-        print(f"[Solver] Loading model in {dtype} (precision: {self.args.precision})...")
-        model = LLaDAForMultiModalGeneration.from_pretrained(init_from, torch_dtype=dtype, device_map="cpu")
-        
-        # Force scale_logits to True to prevent NaN
-        if hasattr(model.config, 'scale_logits'):
-            print(f"[Solver] Changing scale_logits from {model.config.scale_logits} to True")
-            model.config.scale_logits = True
-        
-        if self.args.checkpointing:
-            print("[Solver] Enabling Activation Checkpointing...")
-            model.model.set_activation_checkpointing("whole_layer")
 
-        # --- LoRA Injection ---
-        if self.args.use_lora:
-            print(f"[Solver] Applying LoRA with rank: {self.args.lora_rank}, alpha: {self.args.lora_alpha}, dropout: {self.args.lora_dropout}")
-            from peft import LoraConfig, get_peft_model, TaskType
-            
             target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
             if self.args.wo_lm_head:
                 target_modules = [tm for tm in target_modules if tm != "ff_out"]
             print(f"[Solver] LoRA Target Modules: {target_modules}")
+
+            print(f"[Solver] Loading base model in {dtype} (precision: {self.args.precision})...")
+            base_model = LLaDAForMultiModalGeneration.from_pretrained(self.args.init_from, torch_dtype=dtype, device_map="cpu")
+
+            if hasattr(base_model.config, 'scale_logits'):
+                print(f"[Solver] Changing scale_logits from {base_model.config.scale_logits} to True")
+                base_model.config.scale_logits = True
             
-            # Freeze base model parameters
-            for param in model.parameters():
-                param.requires_grad = False
+            if self.args.checkpointing:
+                print("[Solver] Enabling Activation Checkpointing...")
+                base_model.model.set_activation_checkpointing("whole_layer")
             
-            lora_config = LoraConfig(
-                r=self.args.lora_rank,
-                lora_alpha=self.args.lora_alpha,
-                target_modules=target_modules,
-                lora_dropout=self.args.lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM", # Using CAUSAL_LM as generic base, though it's multimodal
-                modules_to_save=[] # Add if needed
-            )
-            model = get_peft_model(model, lora_config)
+            # Load LoRA adapter from checkpoint
+            from peft import PeftModel
+            print(f"[Solver] Loading LoRA adapter from {self.args.resume_path}...")
+            model = PeftModel.from_pretrained(base_model, self.args.resume_path, is_trainable=True)
             model.print_trainable_parameters()
+            
+        else:
+            # Fresh start or FSDP resume: Standard loading from init_from
+            print(f"[Solver] Loading model in {dtype} (precision: {self.args.precision})...")
+            model = LLaDAForMultiModalGeneration.from_pretrained(init_from, torch_dtype=dtype, device_map="cpu")
+            
+            if hasattr(model.config, 'scale_logits'):
+                print(f"[Solver] Changing scale_logits from {model.config.scale_logits} to True")
+                model.config.scale_logits = True
+            
+            if self.args.checkpointing:
+                print("[Solver] Enabling Activation Checkpointing...")
+                model.model.set_activation_checkpointing("whole_layer")
+
+            # Apply LoRA for fresh start (not resume)
+            if self.args.use_lora and not self.args.resume_path:
+                print(f"[Solver] Applying LoRA with rank: {self.args.lora_rank}, alpha: {self.args.lora_alpha}, dropout: {self.args.lora_dropout}")
+                from peft import LoraConfig, get_peft_model
+                
+                target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
+                print(f"[Solver] LoRA Target Modules: {target_modules}")
+                
+                # Freeze base model parameters
+                for param in model.parameters():
+                    param.requires_grad = False
+                
+                lora_config = LoraConfig(
+                    r=self.args.lora_rank,
+                    lora_alpha=self.args.lora_alpha,
+                    target_modules=target_modules,
+                    lora_dropout=self.args.lora_dropout,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    modules_to_save=[]
+                )
+                model = get_peft_model(model, lora_config)
+                
+                # Freeze LM head ff_out while keeping block ff_out LoRAs trainable
+                for n, p in model.named_parameters():
+                    if "transformer.ff_out" in n and ".blocks." not in n:
+                        p.requires_grad = False
+                        print(f"[info] frozen LM head ff_out: {n}")
+                model.print_trainable_parameters()
             
         return model, tokenizer
 
@@ -548,6 +632,135 @@ class Solver(FinetuneSolverBase):
         model.save_pretrained(save_path)
         tokenizer.save_pretrained(save_path)
         print("[Solver] Starting point saved.")
+
+    def resume(self, resume_path: str):
+        """
+        Resume training from a checkpoint.
+        _model_func handles optimizer, epoch/iter/step, and metric_logger.
+        """
+        self.logger.info(f"[Resume] >>> Entering resume() method")
+        self.logger.info(f"[Resume] Resuming from checkpoint: {resume_path}")
+        print(f"[Resume] >>> Entering resume() method for: {resume_path}")
+        
+        is_fsdp = isinstance(self.model, FSDP)
+        self.logger.info(f"[Resume] Model is FSDP: {is_fsdp}")
+        print(f"[Resume] Model is FSDP: {is_fsdp}")
+        
+        # Parse epoch, iteration, and global_step from checkpoint name
+        ckpt_name = os.path.basename(resume_path)
+        resume_epoch, resume_iteration, resume_global_step = parse_checkpoint_name(ckpt_name)
+        self.logger.info(f"[Resume] Parsed checkpoint: epoch={resume_epoch}, iter={resume_iteration}, step={resume_global_step}")
+        print(f"[Resume] Parsed checkpoint: epoch={resume_epoch}, iter={resume_iteration}, step={resume_global_step}")
+        
+        # Set start_epoch and start_iter
+        if resume_iteration is None:
+            self.start_epoch = resume_epoch + 1
+            self.start_iter = 0
+        else:
+            self.start_epoch = resume_epoch
+            self.start_iter = resume_iteration + 1
+        
+        # Set global_step
+        if resume_global_step is not None:
+            self.global_step = resume_global_step
+        else:
+            # Estimate from epoch/iter
+            steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
+            self.global_step = resume_epoch * steps_per_epoch
+            if resume_iteration:
+                self.global_step += resume_iteration // self.args.accum_iter
+        
+        self.logger.info(f"[Resume] Will start from epoch={self.start_epoch}, iter={self.start_iter}, global_step={self.global_step}")
+        print(f"[Resume] Will start from epoch={self.start_epoch}, iter={self.start_iter}, global_step={self.global_step}")
+        
+        # Load optimizer state
+        if is_fsdp:
+            self.logger.info("[Resume] Loading FSDP optimizer...")
+            print("[Resume] Loading FSDP optimizer...")
+            self._resume_fsdp_optimizer(resume_path)
+        else:
+            self.logger.info("[Resume] Loading non-FSDP optimizer...")
+            print("[Resume] Loading non-FSDP optimizer...")
+            self._resume_non_fsdp_optimizer(resume_path)
+        
+        # Load metric_logger if available
+        self.logger.info("[Resume] Loading metric_logger...")
+        print("[Resume] Loading metric_logger...")
+        self._resume_metric_logger(resume_path)
+        
+        self.logger.info("[Resume] <<< Resume complete.")
+        print("[Resume] <<< Resume complete.")
+    
+    def _resume_fsdp_optimizer(self, resume_path: str):
+        """Resume optimizer state for FSDP models (per-rank optimizer files)."""
+        opt_files = [x for x in os.listdir(resume_path) if x.startswith("optimizer.") and x.endswith(".pth")]
+        
+        if len(opt_files) == 0:
+            self.logger.warning(f"[Resume] No optimizer files found in {resume_path}, skipping optimizer resume.")
+            return
+        
+        opt_state_world_size = len(opt_files)
+        if opt_state_world_size != dist.get_world_size():
+            self.logger.warning(
+                f"[Resume] Optimizer checkpoint world size ({opt_state_world_size}) does not match "
+                f"current world size ({dist.get_world_size()}). Skipping optimizer resume."
+            )
+            return
+        
+        opt_path = os.path.join(
+            resume_path,
+            f"optimizer.{dist.get_rank():05d}-of-{dist.get_world_size():05d}.pth"
+        )
+        
+        if os.path.exists(opt_path):
+            self.logger.info(f"[Resume] Loading FSDP optimizer from: {opt_path}")
+            self.optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+            # Reset LR to args (in case we want to change LR on resume)
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = self.args.lr
+                param_group["weight_decay"] = self.args.wd
+            self.logger.info("[Resume] FSDP optimizer loaded successfully.")
+        else:
+            self.logger.warning(f"[Resume] Optimizer file not found: {opt_path}")
+    
+    def _resume_non_fsdp_optimizer(self, resume_path: str):
+        """Resume optimizer state for non-FSDP models (single optimizer file)."""
+        opt_path = os.path.join(resume_path, "optimizer.pth")
+        self.logger.info(f"[Resume] Looking for optimizer at: {opt_path}")
+        print(f"[Resume] Looking for optimizer at: {opt_path}")
+        
+        if os.path.exists(opt_path):
+            self.logger.info(f"[Resume] Found optimizer file, loading from: {opt_path}")
+            print(f"[Resume] Found optimizer file, loading from: {opt_path}")
+            self.optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+            # Reset LR to args
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = self.args.lr
+                param_group["weight_decay"] = self.args.wd
+            self.logger.info("[Resume] Optimizer loaded successfully.")
+            print("[Resume] Optimizer loaded successfully.")
+        else:
+            self.logger.warning(f"[Resume] WARNING: Optimizer file not found at {opt_path}, starting with fresh optimizer!")
+            print(f"[Resume] WARNING: Optimizer file not found at {opt_path}, starting with fresh optimizer!")
+    
+    def _resume_metric_logger(self, resume_path: str):
+        """Resume metric_logger from additional_rank_specific or additional.pth."""
+        # Try FSDP-style per-rank file first
+        additional_path = os.path.join(
+            resume_path, f"additional.{dist.get_rank():05d}-of-{dist.get_world_size():05d}.pth"
+        )
+        
+        if not os.path.exists(additional_path):
+            # Try non-FSDP style single file
+            additional_path = os.path.join(resume_path, "additional.pth")
+        
+        if os.path.exists(additional_path):
+            additional_data = torch.load(additional_path, map_location="cpu")
+            if "metric_logger" in additional_data:
+                self.metric_logger_to_resume = additional_data["metric_logger"]
+                self.logger.info("[Resume] Metric logger resumed.")
+        else:
+            self.logger.info("[Resume] No additional data file found, starting with fresh metric_logger.")
 
     @torch.no_grad()
     def validate(self, epoch, format="counting"):
@@ -828,11 +1041,14 @@ class Solver(FinetuneSolverBase):
              self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
              self.vqvae.eval()
 
-        # Initialize global step (estimate)
-        steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
-        self.global_step = self.start_epoch * steps_per_epoch
-        if self.start_iter > 0:
-            self.global_step += self.start_iter // self.args.accum_iter
+        # Initialize global step (only if not already set from resume)
+        if not self.args.resume_path:
+            # Fresh start: calculate global step from epoch/iter
+            steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
+            self.global_step = self.start_epoch * steps_per_epoch
+            if self.start_iter > 0:
+                self.global_step += self.start_iter // self.args.accum_iter
+        # If resuming, global_step was already set in resume()
             
         print(f"[Solver] Starting from Global Step: {self.global_step}")
 
@@ -881,13 +1097,24 @@ class Solver(FinetuneSolverBase):
         if self.global_rank == 0 and self.args.use_wandb:
             wandb.finish()
 
-    def save_checkpoint(self, epoch, iteration=None, global_step=None):
+    def save_checkpoint(self, epoch, iteration=None, global_step=None, metric_logger=None):
+        """
+        Save checkpoint to disk.
+        
+        Two modes:
+        - FSDP: Full model with per-rank optimizer files (via util.ckpt.save)
+        - Non-FSDP: LoRA adapter with single optimizer.pth file
+        """
         print(f"[Solver] Saving checkpoint at global step {self.global_step}")
         
-        # Check if FSDP or regular model
         is_fsdp = isinstance(self.model, FSDP)
         
         if is_fsdp:
+            # Prepare additional_rank_specific for FSDP save
+            additional_rank_specific = None
+            if metric_logger is not None:
+                additional_rank_specific = {"metric_logger": metric_logger}
+            
             util.ckpt.save(
                 self.args.output_dir,
                 self.global_rank == 0,
@@ -898,6 +1125,7 @@ class Solver(FinetuneSolverBase):
                 epoch=epoch,
                 iteration=iteration,
                 global_step=global_step,
+                additional_rank_specific=additional_rank_specific,
                 max_keep=self.args.ckpt_max_keep,
             )
         else:
@@ -920,10 +1148,20 @@ class Solver(FinetuneSolverBase):
                     torch.save(self.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
                     print(f"[Solver] Saved full model to {save_dir}")
                 
+                # Save Optimizer
+                torch.save(self.optimizer.state_dict(), os.path.join(save_dir, "optimizer.pth"))
+                print(f"[Solver] Saved optimizer to {save_dir}/optimizer.pth")
+                
                 # Save Tokenizer and Args
                 self.tokenizer.save_pretrained(save_dir)
                 with open(os.path.join(save_dir, "args.json"), "w") as f:
                     json.dump(vars(self.args), f, indent=2)
+                
+                # Save additional data (metric_logger)
+                if metric_logger is not None:
+                    additional_path = os.path.join(save_dir, "additional.pth")
+                    torch.save({"metric_logger": metric_logger}, additional_path)
+                    print(f"[Solver] Saved metric_logger to {additional_path}")
                 
                 # Handle rotation (remove old checkpoints)
                 util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
@@ -1076,7 +1314,7 @@ class Solver(FinetuneSolverBase):
                      
                 # --- Step-based Saving ---
                 if self.global_step % self.args.save_iteration_interval == 0:
-                     self.save_checkpoint(epoch, iteration=data_iter_step, global_step=self.global_step)
+                     self.save_checkpoint(epoch, iteration=data_iter_step, global_step=self.global_step, metric_logger=metric_logger)
 
             torch.cuda.synchronize()
             metric_logger.update(loss=loss_value)
