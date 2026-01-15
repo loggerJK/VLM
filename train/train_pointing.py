@@ -327,7 +327,7 @@ class Solver(FinetuneSolverBase):
                 "project": self.args.wandb_project,
                 "entity": self.args.wandb_entity,
                 "config": vars(self.args),
-                "mode": "online"
+                # "mode": "online"
             }
             
             # If resuming with a run_id, use resume="allow"
