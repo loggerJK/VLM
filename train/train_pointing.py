@@ -512,12 +512,23 @@ class Solver(FinetuneSolverBase):
             # Resume LoRA: Load base model from init_from, then load adapter from resume_path
             self.logger.info(f"[Resume] Loading base model from {self.args.init_from}, adapter from {self.args.resume_path}")
             
-
-            target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
-            if self.args.wo_lm_head:
-                target_modules = [tm for tm in target_modules if tm != "ff_out"]
-            print(f"[Solver] LoRA Target Modules: {target_modules}")
-
+            # Explicitly load saved LoRA config from checkpoint
+            from peft import LoraConfig, get_peft_model
+            saved_config = LoraConfig.from_pretrained(self.args.resume_path)
+            print(f"[Resume] Loaded LoRA config from checkpoint:")
+            print(f"         - rank: {saved_config.r}")
+            print(f"         - alpha: {saved_config.lora_alpha}")
+            print(f"         - target_modules: {saved_config.target_modules}")
+            print(f"         - dropout: {saved_config.lora_dropout}")
+            
+            # Warn if current args differ from saved config
+            if saved_config.r != self.args.lora_rank:
+                self.logger.warning(f"[Resume] LoRA rank mismatch: saved={saved_config.r}, args={self.args.lora_rank}. Using saved config.")
+            if saved_config.lora_alpha != self.args.lora_alpha:
+                self.logger.warning(f"[Resume] LoRA alpha mismatch: saved={saved_config.lora_alpha}, args={self.args.lora_alpha}. Using saved config.")
+            if "ff_out" in saved_config.target_modules and self.args.wo_lm_head:
+                self.logger.warning("[Resume] Checkpoint has ff_out in LoRA but --wo_lm_head is set. Using saved config (with ff_out).")
+            
             print(f"[Solver] Loading base model in {dtype} (precision: {self.args.precision})...")
             base_model = LLaDAForMultiModalGeneration.from_pretrained(self.args.init_from, torch_dtype=dtype, device_map="cpu")
 
@@ -529,10 +540,16 @@ class Solver(FinetuneSolverBase):
                 print("[Solver] Enabling Activation Checkpointing...")
                 base_model.model.set_activation_checkpointing("whole_layer")
             
-            # Load LoRA adapter from checkpoint
-            from peft import PeftModel
-            print(f"[Solver] Loading LoRA adapter from {self.args.resume_path}...")
-            model = PeftModel.from_pretrained(base_model, self.args.resume_path, is_trainable=True)
+            for param in base_model.parameters():
+                param.requires_grad = False
+            
+            model = get_peft_model(base_model, saved_config)
+            print(f"[Solver] Loading LoRA adapter weights from {self.args.resume_path}...")
+            model.load_adapter(self.args.resume_path, adapter_name="default", is_trainable=True)
+            model.set_adapter("default")
+            
+            breakpoint()
+            
             model.print_trainable_parameters()
             
         else:
@@ -571,11 +588,13 @@ class Solver(FinetuneSolverBase):
                 )
                 model = get_peft_model(model, lora_config)
                 
-                # Freeze LM head ff_out while keeping block ff_out LoRAs trainable
-                for n, p in model.named_parameters():
-                    if "transformer.ff_out" in n and ".blocks." not in n:
-                        p.requires_grad = False
-                        print(f"[info] frozen LM head ff_out: {n}")
+                # Freeze LM head
+                if self.args.wo_lm_head:
+                    for n, p in model.named_parameters():
+                        if "transformer.ff_out" in n and ".blocks." not in n: 
+                            p.requires_grad = False
+                            print(f"[info] frozen ff_out: {n}")
+                
                 model.print_trainable_parameters()
             
         return model, tokenizer
