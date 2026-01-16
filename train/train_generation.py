@@ -41,6 +41,7 @@ from diffusers.image_processor import VaeImageProcessor
 # Image Utils
 from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line, decode_vq_to_image, calculate_vq_params
 from generators.image_generation_generator import generate_image
+from utils.prompt_utils import generate_text_to_image_prompt, create_prompt_templates
 
 # ==============================================================================
 # 1. Special Tokens Global Definition
@@ -420,6 +421,8 @@ class Solver(FinetuneSolverBase):
                 param.requires_grad = False  # Freeze all parameters
                 
             print(f"[Solver] Applying LoRA Adapter (rank={self.args.lora_rank}, alpha={self.args.lora_alpha})...")
+            print(f"[Solver] Target Modules for LoRA: {self.args.lora_target_modules}")
+
             peft_config = LoraConfig(
                 task_type=TaskType.CAUSAL_LM, 
                 inference_mode=False, 
@@ -505,7 +508,15 @@ class Solver(FinetuneSolverBase):
             if not caption:
                 caption = "Generate an image."
             self.validation_prompts.append(caption)
-            
+        
+        seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(self.args.image_size, self.args.image_size)
+        self.validation_params = {
+            "seq_len": seq_len,
+            "newline_every": newline_every,
+            "token_grid_height": token_grid_height,
+            "token_grid_width": token_grid_width
+        }
+
         if self.global_rank == 0:
             print(f"[Solver] Selected {len(self.validation_prompts)} validation prompts:")
             for i, p in enumerate(self.validation_prompts):
@@ -531,7 +542,7 @@ class Solver(FinetuneSolverBase):
         # Ensure all ranks call _setup_validation_prompts if they don't have it
         # Actually, in _setup_validation_prompts I had 'if self.global_rank != 0: return'. 
         # I should change that so all ranks have the same fixed prompts.
-        
+        templates = create_prompt_templates()
         print(f"[Rank {self.global_rank}] [Validation] Generating images at step {step}...")
         self.model.eval()
         
@@ -540,52 +551,37 @@ class Solver(FinetuneSolverBase):
         images = []
         for i, prompt in enumerate(prompts):
             sample_start_time = time.time()
-            system_prompt = "Generate an image according to the text prompt."
-            instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
+            # system_prompt = "Generate an image according to the text prompt."       # template
+            # instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
             
-            # Prepare Input
-            instruction_ids = self.tokenizer(instruction, return_tensors="pt").input_ids.to("cuda")
-            if instruction_ids[0, -1] == self.tokenizer.eos_token_id:
-                instruction_ids = instruction_ids[:, :-1]
-                
-            input_ids = torch.cat([
-                instruction_ids,
-                torch.tensor([[BOA, BOI]], device="cuda")
-            ], dim=1)
-            
-            code_start = input_ids.shape[1]
-            
-            # Append MASK tokens for generation
-            _, _, h_grid, w_grid = calculate_vq_params(self.args.image_size, self.args.image_size)
-            mask_tokens = [MASK] * (h_grid * w_grid)
-            mask_with_breaks = add_break_line(mask_tokens, h_grid, w_grid, NEW_LINE)
-            
-            # Add MASKs + EOI + EOA
-            input_ids = torch.cat([
-                input_ids,
-                torch.tensor([mask_with_breaks + [EOI, EOA]], device="cuda")
-            ], dim=1)
-            
-            # Unconditional ids: try to match instruction format but with empty/generic user
-            uncon_instruction = f"<system>{system_prompt}</system><user></user>"
-            uncon_ids = self.tokenizer(uncon_instruction, return_tensors="pt").input_ids.to("cuda")
-            if uncon_ids[0, -1] == self.tokenizer.eos_token_id:
-                uncon_ids = uncon_ids[:, :-1]
-            uncon_ids = torch.cat([uncon_ids, torch.tensor([[BOA, BOI]], device="cuda")], dim=1)
+            input_prompt, uncon_prompt = generate_text_to_image_prompt(prompt, templates)
 
+            # build initial sequence
+            con_prompt_token = self.tokenizer(input_prompt)["input_ids"]
+            uncon_prompt_token = self.tokenizer(uncon_prompt)["input_ids"]
+
+            img_mask_token = add_break_line([MASK] * self.validation_params["seq_len"], self.validation_params["token_grid_height"], self.validation_params["token_grid_width"], new_number = NEW_LINE)
+            img_pred_token = [BOA] + [BOI] + img_mask_token + [EOI] + [EOA]
+
+            prompt_ids = torch.tensor(con_prompt_token + img_pred_token, device="cuda").unsqueeze(0)
+            uncon_ids = torch.tensor(uncon_prompt_token, device="cuda").unsqueeze(0)
+
+            code_start = len(con_prompt_token) + 2  # +2 for BOA and BOI
             try:
-                # Generate (All ranks participate)
                 out_tokens = generate_image(
                     self.model,
-                    input_ids,
+                    prompt_ids,
+                    seq_len=self.validation_params["seq_len"],
+                    newline_every=self.validation_params["newline_every"],
+                    timesteps=64,
+                    temperature=1.0,        
+                    cfg_scale=4.0,
                     uncon_ids=uncon_ids,
                     code_start=code_start,
-                    cfg_scale=4.0,
-                    timesteps=64,
-                    mask_token_id=MASK,
-                    newline_id=NEW_LINE
+                    refresh_interval=5,
+                    warmup_ratio=0.3
                 )
-                
+
                 # Only rank 0 decodes and prepares WandB image
                 if self.global_rank == 0:
                     img = decode_vq_to_image(

@@ -1,7 +1,7 @@
 #!/bin/bash
 # set -e
 # Default GPU
-export CUDA_VISIBLE_DEVICES=3,4
+export CUDA_VISIBLE_DEVICES=0,1 
 export PYTHONNOUSERSITE=1
 export WANDB_API_KEY=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
 export WANDB_PROJECT=lumina-generation-debug    
@@ -23,7 +23,7 @@ lr=2e-4
 wd=0.01
 batchsize_per_gpu=1
 max_seq_len=5120
-exp_name="lumina_gen_512_lora128-$(date +%Y%m%d-%H%M%S)"
+exp_name="[h100]_lumina_gen_1024_lora128-$(date +%Y%m%d-%H%M%S)"
 output_dir="output/$exp_name"
 lora_rank=128
 
@@ -34,7 +34,7 @@ echo "Dataset: $DATASET_NAME"
 echo "Output: $output_dir"
 echo "Extra Args: $@"
 
-/home/cvlab22/anaconda3/envs/lumina_dimoo/bin/python -m torch.distributed.run --nproc_per_node=2 --master_port=29508 train/train_generation.py \
+python -m torch.distributed.run --nproc_per_node=2 --master_port=29508 train/train_generation.py \
     --dataset_name "$DATASET_NAME" \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter 64 \
@@ -45,7 +45,7 @@ echo "Extra Args: $@"
     --wd ${wd} \
     --clip_grad 1.0 \
     --precision bf16 \
-    --image_size 512 \
+    --image_size 1024 \
     --data_parallel fsdp \
     --checkpointing \
     --data_config $data_config \
@@ -60,5 +60,6 @@ echo "Extra Args: $@"
     --wandb_run_name ${exp_name} \
     --validation_interval 100 \
     --save_iteration_interval 500 \
+    --lora_target_modules q_proj k_proj v_proj attn_out ff_proj up_proj \               # add ff_out if you want to train lm_head as well
     "$@" \
     2>&1 | tee "$output_dir/output.log"
