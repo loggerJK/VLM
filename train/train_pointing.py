@@ -63,6 +63,26 @@ PAD = 126339                          # Padding token (not in config.py, from tr
 # 2. Helper Functions
 # ==============================================================================
 
+def parse_checkpoint_name(ckpt_str: str):
+    """
+    Parse epoch, iteration, and global_step from checkpoint directory name.
+    
+    Examples:
+        - "epoch3" -> (3, None, None)
+        - "epoch3-iter120" -> (3, 120, None)
+        - "epoch3-iter120-step450" -> (3, 120, 450)
+    """
+    parts = ckpt_str.split("-")
+    epoch = int(parts[0].replace("epoch", ""))
+    iteration = None
+    global_step = None
+    for part in parts[1:]:
+        if part.startswith("iter"):
+            iteration = int(part.replace("iter", ""))
+        elif part.startswith("step"):
+            global_step = int(part.replace("step", ""))
+    return epoch, iteration, global_step
+
 def mask_codes(codes, sch="cosine", mask = False, editing = False):
     """
     Applies masking to the target tokens for Masked Diffusion Loss.
@@ -232,6 +252,9 @@ class Solver(FinetuneSolverBase):
 
         # Task Argument
         parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type")
+        
+        # Wandb Resume
+        parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID for resume")
         return parser
     
     def setup_fsdp_sync(
@@ -294,20 +317,39 @@ class Solver(FinetuneSolverBase):
 
     def __init__(self, args):
         super().__init__(args)
+
+        # Initialize WandB with resume support
         if self.args.use_wandb and self.global_rank == 0:
-            wandb.init(
-                project=self.args.wandb_project,
-                entity=self.args.wandb_entity,
-                name=self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                config=vars(self.args),
-                # mode="online"
-            )
+            wandb_kwargs = {
+                "project": self.args.wandb_project,
+                "entity": self.args.wandb_entity,
+                "config": vars(self.args),
+                # "mode": "online"
+            }
+
+            # If resuming with a run_id, use resume="allow"
+            if self.args.wandb_run_id:
+                wandb_kwargs["id"] = self.args.wandb_run_id
+                wandb_kwargs["resume"] = "allow"
+                wandb_kwargs["name"] = self.args.wandb_run_name  # Can be None
+                self.logger.info(f"[WandB] Resuming run with ID: {self.args.wandb_run_id}")
+            else:
+                wandb_kwargs["name"] = self.args.wandb_run_name or f"run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+            wandb.init(**wandb_kwargs)
+
+            # Save run_id for future reference
+            if self.args.wandb_run_id is None:
+                self.logger.info(f"[WandB] New run created with ID: {wandb.run.id}")
+                
         self.val_table = None
         self.global_step = 0
 
     def build_model(self):
         # Full override of build_model to handle LoRA freezing correctly without relying on FinetuneSolverBase's logic
-        init_from = self.args.resume_path or self.args.init_from
+        # init_from = self.args.resume_path or self.args.init_from
+        init_from = self.args.init_from
+        
         
         if init_from is None:
             starting_point_path = Path(self.args.output_dir) / "starting_point"
@@ -446,6 +488,11 @@ class Solver(FinetuneSolverBase):
         return model, tokenizer, optimizer
 
     def _model_func(self, init_from: str) -> (nn.Module, None):
+        """
+        Resume cases:
+        - LoRA resume: Load base model from init_from, then load adapter from resume_path
+        - FSDP resume: Load full model from resume_path via from_pretrained
+        """
         tokenizer = AutoTokenizer.from_pretrained(init_from, trust_remote_code=True)
         
         # Determine dtype based on precision arg
@@ -469,32 +516,84 @@ class Solver(FinetuneSolverBase):
             model.model.set_activation_checkpointing("whole_layer")
 
         # --- LoRA Injection ---
-        if self.args.use_lora:
-            print(f"[Solver] Applying LoRA with rank: {self.args.lora_rank}, alpha: {self.args.lora_alpha}, dropout: {self.args.lora_dropout}")
-            from peft import LoraConfig, get_peft_model, TaskType
-            
-            target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
-            if self.args.wo_lm_head:
-                target_modules = [tm for tm in target_modules if tm != "ff_out"]
-            print(f"[Solver] LoRA Target Modules: {target_modules}")
+        if self.args.use_lora :
             
             # Freeze base model parameters
             for param in model.parameters():
                 param.requires_grad = False
+                
+            # 새로 Init 하는 경우
+            if self.args.resume_path is None:
+                print(f"[Solver] Applying LoRA with rank: {self.args.lora_rank}, alpha: {self.args.lora_alpha}, dropout: {self.args.lora_dropout}")
+                from peft import LoraConfig, get_peft_model, TaskType
+                
+                target_modules = ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj", "ff_out"]
+                if self.args.wo_lm_head:
+                    target_modules = [tm for tm in target_modules if tm != "ff_out"]
+                print(f"[Solver] LoRA Target Modules: {target_modules}")
+                
+                lora_config = LoraConfig(
+                    r=self.args.lora_rank,
+                    lora_alpha=self.args.lora_alpha,
+                    target_modules=target_modules,
+                    lora_dropout=self.args.lora_dropout,
+                    bias="none",
+                    task_type="CAUSAL_LM", # Using CAUSAL_LM as generic base, though it's multimodal
+                    modules_to_save=[] # Add if needed
+                )
+                model = get_peft_model(model, lora_config)
             
-            lora_config = LoraConfig(
-                r=self.args.lora_rank,
-                lora_alpha=self.args.lora_alpha,
-                target_modules=target_modules,
-                lora_dropout=self.args.lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM", # Using CAUSAL_LM as generic base, though it's multimodal
-                modules_to_save=[] # Add if needed
-            )
-            model = get_peft_model(model, lora_config)
+            # Lora만 활성화
+            elif self.args.resume_path is not None:
+                from peft import PeftModel
+                print(f"[Solver] Resuming LoRA from {self.args.resume_path}...")
+                # Then load LoRA adapter
+                model = PeftModel.from_pretrained(model, self.args.resume_path, torch_dtype=dtype, is_trainable=True)
+            
             model.print_trainable_parameters()
             
         return model, tokenizer
+    
+    def resume(self, resume_path: str):
+        """
+        Resume training from a checkpoint.
+        _model_func handles optimizer, epoch/iter/step, and metric_logger.
+        """
+        self.logger.info(f"[Resume] >>> Entering resume() method")
+        self.logger.info(f"[Resume] Resuming from checkpoint: {resume_path}")
+        print(f"[Resume] >>> Entering resume() method for: {resume_path}")
+
+        is_fsdp = isinstance(self.model, FSDP)
+        self.logger.info(f"[Resume] Model is FSDP: {is_fsdp}")
+        print(f"[Resume] Model is FSDP: {is_fsdp}")
+
+        # Parse epoch, iteration, and global_step from checkpoint name
+        ckpt_name = os.path.basename(resume_path)
+        resume_epoch, resume_iteration, resume_global_step = parse_checkpoint_name(ckpt_name)
+        self.logger.info(f"[Resume] Parsed checkpoint: epoch={resume_epoch}, iter={resume_iteration}, step={resume_global_step}")
+        print(f"[Resume] Parsed checkpoint: epoch={resume_epoch}, iter={resume_iteration}, step={resume_global_step}")
+
+        # Set start_epoch and start_iter
+        if resume_iteration is None:
+            self.start_epoch = resume_epoch + 1
+            self.start_iter = 0
+        else:
+            self.start_epoch = resume_epoch
+            self.start_iter = resume_iteration + 1
+
+        # Set global_step
+        if resume_global_step is not None:
+            self.global_step = resume_global_step
+        else:
+            # Estimate from epoch/iter
+            steps_per_epoch = len(self.dataloader_train) // self.args.accum_iter
+            self.global_step = resume_epoch * steps_per_epoch
+            if resume_iteration:
+                self.global_step += resume_iteration // self.args.accum_iter
+
+        self.logger.info(f"[Resume] Will start from epoch={self.start_epoch}, iter={self.start_iter}, global_step={self.global_step}")
+        print(f"[Resume] Will start from epoch={self.start_epoch}, iter={self.start_iter}, global_step={self.global_step}")
+
 
     def _item_processor_func(self, tokenizer=None, max_len=None) -> ItemProcessorBase:
         # Pass image_size from args
