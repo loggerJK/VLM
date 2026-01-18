@@ -1,5 +1,5 @@
 import pickle
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Union
 import random
 from accelerate import init_empty_weights
 import torch
@@ -194,7 +194,11 @@ class Solver(FinetuneSolverBase):
     
     def setup_fsdp_sync(
         self, model: nn.Module, data_parallel: str, precision: str, grad_precision: str = None
-    ) -> FSDP:
+    ) -> Union[FSDP, nn.Module]:                                                                             
+        if data_parallel == "none":                                                                                                 
+           print("[Solver] Data parallel is 'none'. Bypassing FSDP and moving model to CUDA.")       
+           return model.cuda()
+
         print(f"[Solver] setup_fsdp_sync: cpu_offload={self.args.cpu_offload}")
         
         if self.dp_rank == 0:
@@ -202,19 +206,20 @@ class Solver(FinetuneSolverBase):
         else:
             param_init_fn = lambda x: x.to_empty(device=torch.cuda.current_device(), recurse=False)
 
-        # Set CPU Offload
+        # Set CPU Offload based on argument
         cpu_offload = CPUOffload(offload_params=self.args.cpu_offload)
 
-        # #agent edited: [6] FSDP Wrapping Policy adjustment
-        # LoRA models have different structure, need careful wrapping.
-        # For simplicity, we use the default policy or custom based on class names.
+        # Handle LoRA wrapping policies if needed, but standard FSDP policy often works if layers are standard linear
+        # If LoRA is used, FSDP wraps the PeftModel
         
         model = FSDP(
             model,
             auto_wrap_policy=functools.partial(
                 lambda_auto_wrap_policy,
-                lambda_fn=lambda m: m in model.get_fsdp_wrap_module_list() if hasattr(model, 'get_fsdp_wrap_module_list') else False,
-            ),
+                lambda_fn=lambda m: m in model.get_fsdp_wrap_module_list(),
+            ) if not self.args.use_lora else None, # Disable custom wrap policy for LoRA for now, let FSDP handle it or use default
+            # Note: For LoRA + FSDP, explicit wrapping is often better, but for now we try default or 'none' for debugging.
+            # If using 'none', this method returns early.
             process_group=fs_init.get_data_parallel_group(),
             sharding_strategy={
                 "fsdp": ShardingStrategy.FULL_SHARD,
@@ -239,7 +244,7 @@ class Solver(FinetuneSolverBase):
             limit_all_gathers=True,
             use_orig_params=True,
             param_init_fn=param_init_fn,
-            cpu_offload=cpu_offload, 
+            cpu_offload=cpu_offload, # ENABLED
         )
         torch.cuda.synchronize()
 

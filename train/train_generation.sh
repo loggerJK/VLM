@@ -4,7 +4,7 @@
 export CUDA_VISIBLE_DEVICES=0,1 
 export PYTHONNOUSERSITE=1
 export WANDB_API_KEY=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
-export WANDB_PROJECT=lumina-generation-debug    
+export WANDB_PROJECT=lumina-generation-exp
 
 # Arguments
 DATASET_NAME="heez/pixmo-point-count-desc-all"
@@ -23,7 +23,7 @@ lr=2e-4
 wd=0.01
 batchsize_per_gpu=1
 max_seq_len=5120
-exp_name="[h100]_lumina_gen_1024_lora128-$(date +%Y%m%d-%H%M%S)"
+exp_name="[h100]_lumina_gen_1024_lora128_wohead_ckpt-$(date +%Y%m%d-%H%M%S)"
 output_dir="output/$exp_name"
 lora_rank=128
 
@@ -46,8 +46,8 @@ python -m torch.distributed.run --nproc_per_node=2 --master_port=29508 train/tra
     --clip_grad 1.0 \
     --precision bf16 \
     --image_size 1024 \
-    --data_parallel fsdp \
     --checkpointing \
+    --data_parallel none \
     --data_config $data_config \
     --num_workers 4 \
     --output_dir "$output_dir" \
@@ -59,7 +59,10 @@ python -m torch.distributed.run --nproc_per_node=2 --master_port=29508 train/tra
     --wandb_project "lumina-generation" \
     --wandb_run_name ${exp_name} \
     --validation_interval 100 \
-    --save_iteration_interval 500 \
-    --lora_target_modules q_proj k_proj v_proj attn_out ff_proj up_proj \               # add ff_out if you want to train lm_head as well
+    --save_iteration_interval 100 \
+    --use_lora \
+    --lora_target_modules q_proj k_proj v_proj attn_out ff_proj up_proj \
+    --ckpt_max_keep -1 \
     "$@" \
     2>&1 | tee "$output_dir/output.log"
+    # --data_parallel fsdp \
