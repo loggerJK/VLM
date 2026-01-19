@@ -49,7 +49,7 @@ python -m torch.distributed.run --nproc_per_node=${n_gpus} --master_port=29504 t
     --clip_grad 1.0 \
     --precision bf16 \
     --grad_precision bf16 \
-    --image_size 512     \
+    --image_size 1024     \
     --data_parallel fsdp \
     --data_config $data_config \
     --num_workers 4 \
