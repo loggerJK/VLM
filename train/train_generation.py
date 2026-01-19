@@ -573,6 +573,7 @@ class Solver(FinetuneSolverBase):
 
             code_start = len(con_prompt_token) + 2  # +2 for BOA and BOI
             try:
+                
                 out_tokens = generate_image(
                     self.model,
                     prompt_ids,
@@ -584,7 +585,7 @@ class Solver(FinetuneSolverBase):
                     uncon_ids=uncon_ids,
                     code_start=code_start,
                     refresh_interval=5,
-                    warmup_ratio=0.3
+                    warmup_ratio=0.3, 
                 )
 
                 # Only rank 0 decodes and prepares WandB image
@@ -814,7 +815,7 @@ class Solver(FinetuneSolverBase):
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
-                c_loss = self.model(examples, labels)
+                c_loss = self.model(input_ids=examples, labels=labels)
 
             loss = c_loss
             loss_value = loss.item()

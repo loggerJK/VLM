@@ -66,10 +66,14 @@ def generate_image(
     unknown_cnt = vq_mask.sum(dim=1, keepdim=True)
     vq_len = unknown_cnt
 
-    if isinstance(model, LLaDAForMultiModalGeneration):
-        model.caching(use_cache)
-    else:  # DDP
-        model.module.caching(use_cache)
+    m = model.module if hasattr(model, "module") else model
+
+    if hasattr(m, "caching"):
+        m.caching(use_cache)
+    else:
+        # caching을 지원하지 않는 모델이면 그냥 패스하거나,
+        # 필요한 경우 여기서 use_cache 세팅을 다른 방식으로 처리
+        pass
 
     warmup_step = int(timesteps * warmup_ratio)
     refresh_steps = torch.zeros(timesteps, dtype=torch.bool)
@@ -97,10 +101,8 @@ def generate_image(
             keep_n = torch.zeros_like(unknown_cnt)
 
         if use_cache and step and refresh_steps[step]:
-            if isinstance(model, LLaDAForMultiModalGeneration):
-                model.empty_cache()
-            else:  # DDP
-                model.module.empty_cache()
+            if hasattr(m, "empty_cache"):
+                m.empty_cache()
 
         # Forward pass (with/without CFG)
         if cfg_scale > 0:

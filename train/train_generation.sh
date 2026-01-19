@@ -1,7 +1,7 @@
 #!/bin/bash
 # set -e
 # Default GPU
-export CUDA_VISIBLE_DEVICES=0,1 
+export CUDA_VISIBLE_DEVICES=0,1
 export PYTHONNOUSERSITE=1
 export WANDB_API_KEY=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
 export WANDB_PROJECT=lumina-generation-exp
@@ -56,7 +56,7 @@ python -m torch.distributed.run --nproc_per_node=2 --master_port=29508 train/tra
     --disable_length_clustering \
     --use_wandb \
     --lora_rank ${lora_rank} \
-    --wandb_project "lumina-generation" \
+    --wandb_project "$WANDB_PROJECT" \
     --wandb_run_name ${exp_name} \
     --validation_interval 100 \
     --save_iteration_interval 100 \
