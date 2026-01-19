@@ -231,6 +231,7 @@ class Solver(FinetuneSolverBase):
         
         # Validation
         parser.add_argument("--validation_interval", type=int, default=50, help="Validation interval in global steps")
+        parser.add_argument("--validation_as_pointing_format", action="store_true", help="Use pointing format for validation")
 
         # WandB Arguments
         parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
@@ -247,14 +248,16 @@ class Solver(FinetuneSolverBase):
         # Training Arguments
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
-        # Validation Arguments
-        parser.add_argument("--validation_as_pointing_format", action="store_true", help="Use pointing format for validation")
-
         # Task Argument
         parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type")
         
         # Wandb Resume
         parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID for resume")
+        
+        # Dataset arguments
+        parser.add_argument("--count_upper_limit", type=int, default=None, help="Upper limit for count. 20 means count<=20.")
+        parser.add_argument("--count_lower_limit", type=int, default=None, help="Lower limit for count. 0 means count>=0.")
+        
         return parser
     
     def setup_fsdp_sync(
@@ -542,14 +545,16 @@ class Solver(FinetuneSolverBase):
                     modules_to_save=[] # Add if needed
                 )
                 model = get_peft_model(model, lora_config)
+                
             
             # Lora만 활성화
             elif self.args.resume_path is not None:
                 from peft import PeftModel
                 print(f"[Solver] Resuming LoRA from {self.args.resume_path}...")
                 # Then load LoRA adapter
-                model = PeftModel.from_pretrained(model, self.args.resume_path, torch_dtype=dtype, is_trainable=True)
-            
+
+                model = PeftModel.from_pretrained(model, self.args.resume_path, torch_dtype=dtype, is_trainable=True, torch_device="cpu")
+                # model.load_adapter(self.args.resume_path, is_trainable=True)
             model.print_trainable_parameters()
             
         return model, tokenizer
@@ -609,6 +614,7 @@ class Solver(FinetuneSolverBase):
         else:
             print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
             train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
+            
         
         # Validation Dataset (Map-style) - Stored in self.val_ds
         # if LOCAL_VAL_DIR and os.path.exists(LOCAL_VAL_DIR):
@@ -621,7 +627,13 @@ class Solver(FinetuneSolverBase):
         #     # Load only first 100 samples
         #     self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
         self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
-
+        
+        if args.count_upper_limit is not None:
+            train_ds = train_ds.filter(lambda count: count <= args.count_upper_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream = self.val_ds_stream.filter(lambda count: count <= args.count_upper_limit, input_columns=['count'])
+        if args.count_lower_limit is not None:
+            train_ds = train_ds.filter(lambda count: count >= args.count_lower_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream = self.val_ds_stream.filter(lambda count: count >= args.count_lower_limit, input_columns=['count'])
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
         return HFDatasetWrapper(train_ds, item_processor, default_task=self.args.task)
 
@@ -674,7 +686,7 @@ class Solver(FinetuneSolverBase):
                 raise ValueError("FP16 precision is not supported for VQ-VAE.")
             else:
                 dtype = torch.float32
-            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
             self.vqvae.eval()
 
         correct = 0
@@ -712,6 +724,13 @@ class Solver(FinetuneSolverBase):
                 #     break
                 
                 image = item.get('image')
+                
+                from io import BytesIO
+                from PIL import Image
+                # if image is dict with 'bytes' key, convert to PIL Image
+                if isinstance(image, dict) and 'bytes' in image:
+                    image = Image.open(BytesIO(image['bytes'])).convert("RGB")
+                
                 question = item.get('question', '')
                 gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
                 label = item.get('label', '<object>')
@@ -753,7 +772,7 @@ class Solver(FinetuneSolverBase):
                 GEN_LENGTH= 20 if format == "counting" else 512
                 BLOCK_LENGTH= 20 if format == "counting" else 128
                 input_token = input_token + [BOA] + GEN_LENGTH * [MASK] # gen_length=10 for short answer
-                input_ids = torch.tensor(input_token, device="cuda").unsqueeze(0)
+                input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
                 
                 # Generate (All ranks must call this!)
                 out_new = generate_text_understanding(
@@ -924,7 +943,8 @@ class Solver(FinetuneSolverBase):
                 raise ValueError("FP16 precision is not supported for VQ-VAE.")
              else:
                 dtype = torch.float32
-             self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+             self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+             print(f"[Solver] Loaded VQ-VAE for validation for rank {self.global_rank}.")
              self.vqvae.eval()
 
         # Initialize global step (estimate)
@@ -1040,7 +1060,7 @@ class Solver(FinetuneSolverBase):
             else:
                 dtype = torch.float32
 
-            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
             self.vqvae.eval()
 
         self.model.train(True)
