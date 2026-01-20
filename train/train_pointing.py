@@ -946,10 +946,13 @@ class Solver(FinetuneSolverBase):
                 if isinstance(image, dict) and 'bytes' in image:
                     image = Image.open(BytesIO(image['bytes'])).convert("RGB")
                 
-                question = item.get('question', '')
+                if self.args.task == "counting":
+                    question = item.get('question_count', '')
+                elif self.args.task == "pointing":
+                    question = item.get('question', '')
                 gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
                 label = item.get('label', '<object>')
-                question = question.replace('**<number>** of', '**<number>**')
+                question = question.replace('**<number>** of', '**<number>**') # Deprecated old format fix
                 
                 if format == 'pointing':
                     question_point_example = f'''<points x1="<coordinate of  x1>" y1="<coordinate of  y1>" x2="<coordinate of  x2>" y2="<coordinate of  y2>" ... x_n="<coordinate of  x_n>" y_n="<coordinate of  y_n>" alt="{label}">{label}</points>.'''.strip()
@@ -1242,6 +1245,8 @@ class Solver(FinetuneSolverBase):
                 global_step=global_step,
                 max_keep=self.args.ckpt_max_keep,
             )
+            # Handle rotation (remove old checkpoints)
+            util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
         else:
             # Handle Non-FSDP / LoRA Saving
             if self.global_rank == 0:
@@ -1267,8 +1272,6 @@ class Solver(FinetuneSolverBase):
                 with open(os.path.join(save_dir, "args.json"), "w") as f:
                     json.dump(vars(self.args), f, indent=2)
                 
-                # Handle rotation (remove old checkpoints)
-                util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
         
         dist.barrier() # Sync
 

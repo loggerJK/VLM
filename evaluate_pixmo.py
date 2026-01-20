@@ -90,6 +90,7 @@ def main():
     parser.add_argument("--block_length", type=int, default=256, help="Block length")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="LoRA checkpoint path (if any)")
+    parser.add_argument("--resolution", type=int, default=1024, help="Image resolution (assumed square)")
 
     args = parser.parse_args()
 
