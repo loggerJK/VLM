@@ -838,6 +838,8 @@ class Solver(FinetuneSolverBase):
         train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
         train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
         
+        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+        
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
@@ -864,7 +866,7 @@ class Solver(FinetuneSolverBase):
         print("[Solver] Starting point saved.")
 
     @torch.no_grad()
-    def validate(self, epoch, format="counting"):
+    def validate(self, epoch, format="counting", split="val"):
         dist.barrier() # Sync before validation
         
         local_rank = dist.get_rank() 
@@ -875,7 +877,7 @@ class Solver(FinetuneSolverBase):
         # self.model.disable_adapter_layers() if self.args.use_lora else None
         
         if self.global_rank == 0:
-            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on CountBenchQA...")
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on CountBenchQA ({split})...")
         
         self.model.eval()
         
@@ -896,20 +898,30 @@ class Solver(FinetuneSolverBase):
         total = 0
         eval_limit = 100
         
-        # All ranks iterate, but effectively they process the same data if not sharded. 
-        # For FSDP generation, they MUST run the same inputs to keep internal states synced.
-        eval_dataset = iter(self.val_ds_stream)
         details_buffer = []
         gt_counts = []
         pred_counts = []
         
-        local_dataset_list = []
-        for i, _item in enumerate(eval_dataset):
-            if i >= eval_limit:
-                break
-            if i % world_size == local_rank:
-                # print(f"[Rank {local_rank}] Adding sample {i} to local eval set.")
-                local_dataset_list.append(_item)
+        if split == "val":
+            # All ranks iterate, but effectively they process the same data if not sharded. 
+            # For FSDP generation, they MUST run the same inputs to keep internal states synced.
+            eval_dataset = iter(self.val_ds_stream)
+            local_dataset_list = []
+            for i, _item in enumerate(eval_dataset):
+                if i >= eval_limit:
+                    break
+                if i % world_size == local_rank:
+                    # print(f"[Rank {local_rank}] Adding sample {i} to local eval set.")
+                    local_dataset_list.append(_item)
+        elif split == "train":
+            # use self.train_und_ds_val for quick validation on training data
+            eval_dataset = self.train_und_ds_val
+            local_dataset_list = []
+            for i, _item in enumerate(eval_dataset):
+                if i % world_size == local_rank:
+                    local_dataset_list.append(_item)
+        else:
+            raise ValueError(f"Unknown split: {split}")
         
         
         # WandB Table
@@ -920,7 +932,7 @@ class Solver(FinetuneSolverBase):
             count = 0
             # Only rank 0 shows progress bar to avoid clutter
             disable_tqdm = (self.global_rank != 0)
-            progress = tqdm(range(len(local_dataset_list)), desc="Validation", unit="sample", disable=disable_tqdm)
+            progress = tqdm(range(len(local_dataset_list)), desc=f"Validation ({split})", unit="sample", disable=disable_tqdm)
             
             for item in local_dataset_list:
                 # if count >= eval_limit:
@@ -1053,8 +1065,8 @@ class Solver(FinetuneSolverBase):
                 deviations = [abs(g - p) for g, p in zip(gt_counts, pred_counts)]
                 mean_avg_deviation = sum(deviations) / len(deviations) if deviations else 0.0
                 
-                print(f"Validation Accuracy ({format}): {accuracy:.4f} ({correct}/{total})")
-                print(f"Mean Average Deviation ({format}): {mean_avg_deviation:.4f}")
+                print(f"[Split {split}] Validation Accuracy ({format}): {accuracy:.4f} ({correct}/{total})")
+                print(f"[Split {split}] Mean Average Deviation ({format}): {mean_avg_deviation:.4f}")
                 
                 # Generate Confusion Matrix
                 try:
@@ -1107,17 +1119,17 @@ class Solver(FinetuneSolverBase):
                         self.val_table.add_data(self.global_step, accuracy, all_details)
                     
                     log_data = {
-                        "val/accuracy" if format == "counting" else "val/accuracy_pointing": accuracy, 
-                        "val/mean_avg_deviation" if format == "counting" else "val/mean_avg_deviation_pointing": mean_avg_deviation,
-                        "val/epoch": epoch,
+                        f"{split}/accuracy" if format == "counting" else f"{split}/accuracy_pointing": accuracy, 
+                        f"{split}/mean_avg_deviation" if format == "counting" else f"{split}/mean_avg_deviation_pointing": mean_avg_deviation,
+                        f"{split}/epoch": epoch,
                         "global_step": self.global_step,
-                        "val/predictions": self.val_table
+                        f"{split}/predictions": self.val_table
                     }
                     
                     if cm_image is not None:
-                        log_data["val/confusion_matrix" if format == "counting" else "val/confusion_matrix_pointing"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
+                        log_data[f"{split}/confusion_matrix" if format == "counting" else f"{split}/confusion_matrix_pointing"] = wandb.Image(cm_image, caption=f"Confusion Matrix Epoch {epoch}")
                     if cm_image_fixed is not None:
-                        log_data["val/confusion_matrix_0-20" if format == "counting" else "val/confusion_matrix_0-20_pointing"] = wandb.Image(cm_image_fixed, caption=f"Confusion Matrix 0-20 Epoch {epoch}")
+                        log_data[f"{split}/confusion_matrix_0-20" if format == "counting" else f"{split}/confusion_matrix_0-20_pointing"] = wandb.Image(cm_image_fixed, caption=f"Confusion Matrix 0-20 Epoch {epoch}")
                     
                     wandb.log(log_data)
                 
@@ -1161,9 +1173,11 @@ class Solver(FinetuneSolverBase):
         # Initial Validation (Unconditional)
         # self.save_checkpoint(epoch=self.start_epoch, iteration=0, global_step=self.global_step)
         if self.args.mode in ['und', 'both']:
-            self.validate(self.start_epoch, format="counting")
+            self.validate(self.start_epoch, format="counting", split="train")
+            self.validate(self.start_epoch, format="counting", split="val")
             if self.args.validation_as_pointing_format:
-                self.validate(self.start_epoch, format="pointing")
+                self.validate(self.start_epoch, format="pointing", split="train")
+                self.validate(self.start_epoch, format="pointing", split="val")
             
         if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
             if self.global_rank == 0:
@@ -1371,9 +1385,9 @@ class Solver(FinetuneSolverBase):
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
                     
-                task_type = "Gen" if is_generation else "Und"
-                if self.global_rank == 0 :
-                    print(f"[{task_type}]: instruction len: {len(instruction_token)}, answer len: {len(answer_token) if not is_generation else 'N/A'}, masked image len: {len(image_tokens_raw) if is_generation else 'N/A'}, final input len: {len(final_input)}")
+                # task_type = "Gen" if is_generation else "Und"
+                # if self.global_rank == 0 :
+                #     print(f"[{task_type}]: instruction len: {len(instruction_token)}, answer len: {len(answer_token) if not is_generation else 'N/A'}, masked image len: {len(image_tokens_raw) if is_generation else 'N/A'}, final input len: {len(final_input)}")
                 
 
                 input_ids_list.append(final_input)
@@ -1434,9 +1448,11 @@ class Solver(FinetuneSolverBase):
                 # --- Step-based Validation ---
                 if self.global_step % self.args.validation_interval == 0:
                     if self.args.mode in ['und', 'both']:
-                        self.validate(epoch)
+                        self.validate(epoch, split="train")
+                        self.validate(epoch, split="val")
                         if self.args.validation_as_pointing_format:
-                            self.validate(epoch, format="pointing")
+                            self.validate(epoch, format="pointing", split="train")
+                            self.validate(epoch, format="pointing", split="val")
                         
                     if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
                         if self.global_rank == 0:
