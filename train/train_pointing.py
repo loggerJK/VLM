@@ -825,7 +825,7 @@ class Solver(FinetuneSolverBase):
         # else:
         #     # Load only first 100 samples
         #     self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
-        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=True)
+        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=False)
         
         if args.count_upper_limit is not None:
             train_ds = train_ds.filter(lambda count: count <= args.count_upper_limit, input_columns=['count'], num_proc=64)
@@ -946,15 +946,17 @@ class Solver(FinetuneSolverBase):
                 if isinstance(image, dict) and 'bytes' in image:
                     image = Image.open(BytesIO(image['bytes'])).convert("RGB")
                 
-                if self.args.task == "counting":
-                    question = item.get('question_count', '')
-                elif self.args.task == "pointing":
+                if split == "train" :
+                    if self.args.task == "counting":
+                        question = item.get('question_count', '')
+                elif split == "val":
                     question = item.get('question', '')
-                gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
-                label = item.get('label', '<object>')
                 question = question.replace('**<number>** of', '**<number>**') # Deprecated old format fix
+                        
+                gt_count = item.get('count') # Pointing task might not have count, handle gracefully if needed or assume mixed dataset
                 
                 if format == 'pointing':
+                    label = item.get('label', '<object>')
                     question_point_example = f'''<points x1="<coordinate of  x1>" y1="<coordinate of  y1>" x2="<coordinate of  x2>" y2="<coordinate of  y2>" ... x_n="<coordinate of  x_n>" y_n="<coordinate of  y_n>" alt="{label}">{label}</points>.'''.strip()
                     question_count_example = f"There are **<number>** {label} in the image.".strip()
                     
