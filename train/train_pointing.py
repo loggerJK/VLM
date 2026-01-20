@@ -174,6 +174,8 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
         # Check key 'descriptions' first for understanding generation
         
         caption = data_item.get('descriptions', None)
+        if isinstance(caption, list):
+            caption = caption[0]
         
         # Generation Data
         if caption is not None:
@@ -669,40 +671,37 @@ class Solver(FinetuneSolverBase):
     def _setup_validation_prompts(self):
         # All ranks should run this to have consistent prompts for FSDP generation
         if self.global_rank == 0:
-            print(f"[Solver] Setting up validation prompts from {self.args.dataset_name}...")
+            print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
         
-        try:
-            # Try loading validation split
-            val_ds = load_dataset(self.args.dataset_name, split="validation")
-        except Exception:
-            try:
-                if self.global_rank == 0: print("[Solver] Validation split not found, trying 'test' split...")
-                val_ds = load_dataset(self.args.dataset_name, split="test")
-            except Exception:
-                if self.global_rank == 0: print("[Solver] Test split not found, falling back to 'train' split.")
-                val_ds = load_dataset(self.args.dataset_name, split="train")
+        # Try loading validation split
+        val_ds = load_dataset('heez/pixmo-point-count-gen-und', split="val_gen")
 
         # Sample 10 random indices with fixed seed for consistency
         rng = random.Random(42) 
         indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
         
         self.validation_prompts = []
-        text_keys = ['descriptions', 'text', 'caption', 'prompt']
+        # text_keys = ['descriptions', 'text', 'caption', 'prompt']
         
         for idx in indices:
             item = val_ds[idx]
-            caption = ""
-            for k in text_keys:
-                if k in item:
-                    val = item[k]
-                    if isinstance(val, list):
-                         caption = val[0]
-                    else:
-                         caption = val
-                    break
-            if not caption:
-                caption = "Generate an image."
+            # caption = ""
+            # for k in text_keys:
+            #     if k in item:
+            #         val = item[k]
+            #         if isinstance(val, list):
+            #              caption = val[0]
+            #         else:
+            #              caption = val
+            #         break
+            # if not caption:
+            #     caption = "Generate an image."
+            caption = item.get('descriptions', "Generate an image.")
+            if isinstance(caption, list):
+                caption = caption[0]
             self.validation_prompts.append(caption)
+            
+        # print(f"self.validation_prompts: {self.validation_prompts}")
         
         seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(self.args.gen_image_size, self.args.gen_image_size)
         self.validation_params = {
@@ -826,7 +825,7 @@ class Solver(FinetuneSolverBase):
         # else:
         #     # Load only first 100 samples
         #     self.val_ds = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation[:100]", streaming=False)
-        self.val_ds_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
+        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=True)
         
         if args.count_upper_limit is not None:
             train_ds = train_ds.filter(lambda count: count <= args.count_upper_limit, input_columns=['count'], num_proc=64)
@@ -839,7 +838,7 @@ class Solver(FinetuneSolverBase):
         train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
         train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
         
-        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task)
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
         print(f"[Solver] Creating starting point at {save_path}...")
@@ -1161,9 +1160,15 @@ class Solver(FinetuneSolverBase):
 
         # Initial Validation (Unconditional)
         # self.save_checkpoint(epoch=self.start_epoch, iteration=0, global_step=self.global_step)
-        self.validate(epoch=self.start_epoch)
-        if self.args.validation_as_pointing_format:
-            self.validate(epoch=self.start_epoch, format="pointing")
+        if self.args.mode in ['und', 'both']:
+            self.validate(self.start_epoch, format="counting")
+            if self.args.validation_as_pointing_format:
+                self.validate(self.start_epoch, format="pointing")
+            
+        if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
+            if self.global_rank == 0:
+                print("[Solver] Logging validation images on wandb...")
+            self.log_validation_images(self.global_step)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()
@@ -1365,6 +1370,11 @@ class Solver(FinetuneSolverBase):
                 if len(final_input) > self.args.max_seq_len:
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
+                    
+                task_type = "Gen" if is_generation else "Und"
+                if self.global_rank == 0 :
+                    print(f"[{task_type}]: instruction len: {len(instruction_token)}, answer len: {len(answer_token) if not is_generation else 'N/A'}, masked image len: {len(image_tokens_raw) if is_generation else 'N/A'}, final input len: {len(final_input)}")
+                
 
                 input_ids_list.append(final_input)
                 labels_list.append(final_label)
@@ -1419,7 +1429,7 @@ class Solver(FinetuneSolverBase):
                         "train/global_step": self.global_step,
                         "train/epoch": epoch + (data_iter_step / len(self.dataloader_train))
                      })
-                     accumulated_loss = 0.0 # Reset accumulator
+                    accumulated_loss = 0.0 # Reset accumulator
                 
                 # --- Step-based Validation ---
                 if self.global_step % self.args.validation_interval == 0:

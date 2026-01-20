@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # Activate conda environment
-unset PYTHONPATH
-source /home/work/.project/anaconda3/etc/profile.d/conda.sh
-conda activate lumina_dimoo
+# unset PYTHONPATH
+# source /home/work/.project/anaconda3/etc/profile.d/conda.sh
+# conda activate lumina_dimoo
 export PYTHONNOUSERSITE=1
 
 # Settings
@@ -15,22 +15,23 @@ lr=5e-5
 wd=0.1 # weight decay
 epochs=999
 batchsize_per_gpu=1
-n_gpus=2
-accum_iter=64
+n_gpus=4
+accum_iter=32
 dropout=0.05
 lora_rank=128
-image_size=512
-task="pointing"
-max_seq_len=2048
-exp_name="Lumina-DiMOO-$task-full"
+gen_image_size=1024
+und_image_size=512
+task="counting"
+mode="both" # gen / und / both
+max_seq_len=5120
+exp_name="lora128_${task}_wohead_${mode}"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
-WANDB_API_KEY="f9831e23517e27f7ecac9b54bc2cdcabb3af8c33"
 
 
-export LOCAL_TRAIN_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'
-export LOCAL_VAL_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained'
+# export LOCAL_TRAIN_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'
+# export LOCAL_VAL_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained'
 
 mkdir -p "$output_dir"
 
@@ -49,10 +50,11 @@ python -m torch.distributed.run --nproc_per_node=${n_gpus} --master_port=29504 t
     --clip_grad 1.0 \
     --precision bf16 \
     --grad_precision bf16 \
-    --image_size 1024     \
-    --data_parallel fsdp \
+    --gen_image_size ${gen_image_size} \
+    --und_image_size ${und_image_size} \
+    --data_parallel none \
     --data_config $data_config \
-    --num_workers 4 \
+    --num_workers 16 \
     --output_dir "$output_dir" \
     --save_iteration_interval 500 \
     --validation_interval 100 \
@@ -62,8 +64,10 @@ python -m torch.distributed.run --nproc_per_node=${n_gpus} --master_port=29504 t
     --disable_length_clustering \
     --use_wandb \
     --wandb_project "lumina-pointing" \
-    --wandb_run_name "full" \
+    --wandb_run_name $exp_name \
+    --use_lora \
     --lora_rank ${lora_rank} \
     --task ${task} \
+    --mode ${mode} \
+    --wo_lm_head \
     2>&1 | tee "$output_dir/output.log"
-    # --use_lora \
