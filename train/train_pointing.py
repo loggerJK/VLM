@@ -796,7 +796,7 @@ class Solver(FinetuneSolverBase):
                 print(f"[Rank {self.global_rank}] [Validation] Error generating image for prompt '{prompt}': {e}")
         
         if self.global_rank == 0 and self.args.use_wandb and images:
-            wandb.log({"val/generated_images": images}, step=step)
+            wandb.log({"val/generated_images": images})
             
         self.model.train()
         dist.barrier() # Sync after validation
@@ -809,7 +809,7 @@ class Solver(FinetuneSolverBase):
         #     from datasets import load_from_disk
         #     train_ds = load_from_disk(LOCAL_TRAIN_DIR)
         # else:
-        #     print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
+        #     print(f"[Solver] Loading training dataset from Hugging Face Hub...    : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
         #     train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
         
         train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False)
@@ -1184,7 +1184,7 @@ class Solver(FinetuneSolverBase):
                 self.validate(self.start_epoch, format="pointing", split="train")
                 self.validate(self.start_epoch, format="pointing", split="val")
             
-        if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
+        if self.args.mode in ['gen', 'both']:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
             self.log_validation_images(self.global_step)

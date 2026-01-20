@@ -11,7 +11,7 @@ export PYTHONNOUSERSITE=1
 # Settings
 init_from="Alpha-VLLM/Lumina-DiMOO"
 data_config="configs/data.yaml" # Dummy config
-lr=5e-5
+lr=2e-5
 wd=0.1 # weight decay
 epochs=999
 batchsize_per_gpu=1
@@ -28,6 +28,7 @@ exp_name="lora128_${task}_wohead_${mode}"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
+export WANDB_RUN_ID="iznvrq84"
 
 
 # export LOCAL_TRAIN_DIR='/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-point-count-concat_0-20-qaFixed-final'
@@ -70,4 +71,7 @@ python -m torch.distributed.run --nproc_per_node=${n_gpus} --master_port=29504 t
     --task ${task} \
     --mode ${mode} \
     --wo_lm_head \
+    --ckpt_max_keep ${ckpt_max_keep} \
+    --wandb_run_id "$WANDB_RUN_ID" \
+    --resume_path "/home/jovyan/viral-3dvlm/dvlm/lumina_dimoo/output/lora128_counting_wohead_both/epoch0-iter31999-step1000" \
     2>&1 | tee "$output_dir/output.log"
