@@ -24,7 +24,7 @@ import io
 from PIL import Image
 
 # HuggingFace & Diffusers
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from diffusers import VQModel
 from transformers import AutoTokenizer, AutoConfig
 
@@ -41,9 +41,11 @@ import xllmx.util.misc as misc
 from fairscale.nn.model_parallel import initialize as fs_init
 
 # Image Utils
-from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line
+from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, encode_img_with_breaks_fixed, add_break_line, decode_vq_to_image, calculate_vq_params
 # Generation Utils
 from generators.text_understanding_generator import generate_text_understanding
+from generators.image_generation_generator import generate_image
+from utils.prompt_utils import generate_text_to_image_prompt, create_prompt_templates
 
 from transformers import enable_full_determinism
 
@@ -58,6 +60,7 @@ EOA = SPECIAL_TOKENS["answer_end"]    # End of Answer
 BOI = SPECIAL_TOKENS["boi"]           # Begin of Image
 EOI = SPECIAL_TOKENS["eoi"]           # End of Image
 PAD = 126339                          # Padding token (not in config.py, from train.py)
+IMAGE_TOKEN_OFFSET = SPECIAL_TOKENS["image_token_offset"]
 
 # ==============================================================================
 # 2. Helper Functions
@@ -150,37 +153,57 @@ def extract_number_fixed(text):
 # ==============================================================================
 # 3. ItemProcessor (CPU Stage)
 # ==============================================================================
-class ItemProcessorPointing(ItemProcessorBase):
+class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
     """
-    Preprocesses raw items from Hugging Face Dataset.
-    ONLY performs CPU-bound tasks (Image Cropping, Text Extraction).
-    VQ-VAE encoding is deferred to the GPU training loop.
+    Preprocesses raw items from Hugging Face Dataset for Text-to-Image Generation.
+    - Resizes/Crops Image (CPU)
+    - Extracts Caption/Prompt
     """
-    def __init__(self, tokenizer, max_len, image_size=256, *args, **kwargs):
+    def __init__(self, tokenizer, max_len, und_image_size=512, gen_image_size=1024, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.tokenizer = tokenizer
         self.max_len = max_len
-        self.image_size = image_size
+        self.und_image_size = und_image_size
+        self.gen_image_size = gen_image_size
 
-    def process_item(self, data_item: dict, training_mode=False, task='counting') -> Tuple[Any, str, str]:
+    def process_item(self, data_item: dict, training_mode=False, task='counting') -> Tuple[Any, str]:
+        # #agent edited: [3-1] Dataset column mapping (Adjust based on your dataset)
+        # Expected format: {'image': PIL.Image, 'text': str} or {'image': ..., 'caption': ...}
         image = data_item.get('image')
         
-        if task == 'pointing':
-            question = data_item.get('question', data_item.get('text', ''))
-            answer = str(data_item.get('answer', data_item.get('label', '')))
-        else: # Default or 'counting'
-            question = data_item.get('question_count', data_item.get('text', ''))
-            answer = str(data_item.get('answer_count', data_item.get('label', '')))
+        # Check key 'descriptions' first for understanding generation
+        
+        caption = data_item.get('descriptions', None)
+        
+        # Generation Data
+        if caption is not None:
+            crop_size_list = generate_crop_size_list((self.gen_image_size // 32) ** 2, 32)
+            image = var_center_crop(image, crop_size_list=crop_size_list)
+            return (image, caption)
+        
+        # Understanding Data
+        else:
+            image = data_item.get('image')
+            
+            if task == 'pointing':
+                question = data_item.get('question', data_item.get('text', ''))
+                answer = str(data_item.get('answer', data_item.get('label', '')))
+            else: # Default or 'counting'
+                question = data_item.get('question_count', data_item.get('text', ''))
+                answer = str(data_item.get('answer_count', data_item.get('label', '')))
 
-        # Image Preprocessing (Crop) - Changed to 256 for stability
-        crop_size_list = generate_crop_size_list((self.image_size // 32) ** 2, 32)
-        image = var_center_crop(image, crop_size_list=crop_size_list)
+            # Image Preprocessing (Crop) - Changed to 256 for stability
+            crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
+            image = var_center_crop(image, crop_size_list=crop_size_list)
 
-        # Return Tuple to prevent Collate_fn (zip) from mixing dictionary keys
-        return (image, question, answer)
+            # Return Tuple to prevent Collate_fn (zip) from mixing dictionary keys
+            return (image, question, answer)
+            
 
     def predict_item_token_length(self, data_item: dict) -> int:
         return 1024
+    
+    
 
 # ==============================================================================
 # 4. Dataset Wrapper
@@ -189,19 +212,56 @@ class HFDatasetWrapper(torch.utils.data.Dataset):
     """
     Wraps Hugging Face Dataset to be compatible with xllmx Sampler.
     """
-    def __init__(self, hf_dataset, item_processor, default_task='counting'):
-        self.dataset = hf_dataset
+    def __init__(self, hf_gen_dataset, hf_und_dataset, item_processor, default_task='counting', mode='both'):
+        # Gen, Und 데이터셋은 argument로 항상 들어온다고 가정
+        self.gen_dataset = hf_gen_dataset
+        self.und_dataset = hf_und_dataset
         self.item_processor = item_processor
-        self.default_task = default_task
-        self.meta_collection = [
-            {
-                "type": "default",
-                "len": len(hf_dataset),
-                "ratio": 1.0,
-                "path": "hf_dataset",
-                "item_len_list": [1024] * len(hf_dataset)
-            }
-        ]
+        self.default_task = default_task # 'counting' or 'pointing' for understanding
+        self.mode = mode # 'und', 'gen', or 'both'
+        
+        if dist.get_rank() == 0:
+            print(f"[INFO] Dataset Mode: {mode}")
+        if mode == 'both':
+            self.dataset = concatenate_datasets([hf_und_dataset, hf_gen_dataset])
+            self.meta_collection = [
+                {
+                    "type": "und",
+                    "len": len(hf_und_dataset),
+                    "ratio": 1.0,
+                    "path": "hf_dataset",
+                    "item_len_list": [1024] * len(hf_und_dataset) # Used for length clustering only
+                },
+                {
+                    "type": "gen",
+                    "len": len(hf_gen_dataset),
+                    "ratio": 1.0,
+                    "path": "hf_dataset",
+                    "item_len_list": [1024] * len(hf_gen_dataset)
+                }
+            ]
+        elif mode == 'und':
+            self.dataset = hf_und_dataset
+            self.meta_collection = [
+                {
+                    "type": "und",
+                    "len": len(hf_und_dataset),
+                    "ratio": 1.0,
+                    "path": "hf_dataset",
+                    "item_len_list": [1024] * len(hf_und_dataset)
+                }
+            ]
+        elif mode == 'gen':
+            self.dataset = hf_gen_dataset
+            self.meta_collection = [
+                {
+                    "type": "gen",
+                    "len": len(hf_gen_dataset),
+                    "ratio": 1.0,
+                    "path": "hf_dataset",
+                    "item_len_list": [1024] * len(hf_gen_dataset)
+                }
+            ]
 
     def __len__(self):
         return len(self.dataset)
@@ -226,7 +286,8 @@ class Solver(FinetuneSolverBase):
         parser = super().get_args_parser()
         parser.add_argument("--max_seq_len", default=1024, type=int, help="max token length")
         parser.add_argument("--dropout", type=float, default=0.05, help="dropout rate")
-        parser.add_argument("--image_size", type=int, default=256, help="Image size for preprocessing (default: 256)")
+        parser.add_argument("--und_image_size", type=int, default=512, help="Image size for understanding preprocessing (default: 512)")
+        parser.add_argument("--gen_image_size", type=int, default=1024, help="Image size for generation preprocessing (default: 1024)")
         parser.add_argument("--cpu_offload", action="store_true", help="Enable CPU Offloading for FSDP (default: False)")
         
         # Validation
@@ -249,7 +310,8 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing"], help="Task type for understanding")
+        parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
         
         # Wandb Resume
         parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID for resume")
@@ -520,7 +582,6 @@ class Solver(FinetuneSolverBase):
 
         # --- LoRA Injection ---
         if self.args.use_lora :
-            
             # Freeze base model parameters
             for param in model.parameters():
                 param.requires_grad = False
@@ -602,18 +663,157 @@ class Solver(FinetuneSolverBase):
 
     def _item_processor_func(self, tokenizer=None, max_len=None) -> ItemProcessorBase:
         # Pass image_size from args
-        return ItemProcessorPointing(tokenizer, max_len, image_size=self.args.image_size)
+        # return ItemProcessorPointing(tokenizer, max_len, image_size=self.args.image_size)
+        return ItemProcessorUnderstandingGeneration(tokenizer, max_len, und_image_size=self.args.und_image_size, gen_image_size=self.args.gen_image_size)
+    
+    def _setup_validation_prompts(self):
+        # All ranks should run this to have consistent prompts for FSDP generation
+        if self.global_rank == 0:
+            print(f"[Solver] Setting up validation prompts from {self.args.dataset_name}...")
+        
+        try:
+            # Try loading validation split
+            val_ds = load_dataset(self.args.dataset_name, split="validation")
+        except Exception:
+            try:
+                if self.global_rank == 0: print("[Solver] Validation split not found, trying 'test' split...")
+                val_ds = load_dataset(self.args.dataset_name, split="test")
+            except Exception:
+                if self.global_rank == 0: print("[Solver] Test split not found, falling back to 'train' split.")
+                val_ds = load_dataset(self.args.dataset_name, split="train")
 
+        # Sample 10 random indices with fixed seed for consistency
+        rng = random.Random(42) 
+        indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
+        
+        self.validation_prompts = []
+        text_keys = ['descriptions', 'text', 'caption', 'prompt']
+        
+        for idx in indices:
+            item = val_ds[idx]
+            caption = ""
+            for k in text_keys:
+                if k in item:
+                    val = item[k]
+                    if isinstance(val, list):
+                         caption = val[0]
+                    else:
+                         caption = val
+                    break
+            if not caption:
+                caption = "Generate an image."
+            self.validation_prompts.append(caption)
+        
+        seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(self.args.gen_image_size, self.args.gen_image_size)
+        self.validation_params = {
+            "seq_len": seq_len,
+            "newline_every": newline_every,
+            "token_grid_height": token_grid_height,
+            "token_grid_width": token_grid_width
+        }
+
+        if self.global_rank == 0:
+            print(f"[Solver] Selected {len(self.validation_prompts)} validation prompts:")
+            for i, p in enumerate(self.validation_prompts):
+                print(f"  {i+1}. {p}")
+        
+        # save validation prompts to output_dir for reference
+        if self.global_rank == 0:
+            with open(os.path.join(self.args.output_dir, "validation_prompts.txt"), "w", encoding="utf-8") as f:
+                for p in self.validation_prompts:
+                    f.write(p + "\n")
+        dist.barrier() # Ensure all ranks are ready before moving on
+
+    @torch.no_grad()
+    def log_validation_images(self, step):
+        # All ranks must participate because model(infer=True) inside generate_image 
+        # uses collective communication (FSDP).
+        
+        if not hasattr(self, 'validation_prompts'):
+             self._setup_validation_prompts()
+             # Distribute prompts to all ranks so they all know what to generate
+             # (Simplified: since we used fixed seed in _setup_validation_prompts, all ranks should have same prompts if they all called it)
+        
+        # Ensure all ranks call _setup_validation_prompts if they don't have it
+        # Actually, in _setup_validation_prompts I had 'if self.global_rank != 0: return'. 
+        # I should change that so all ranks have the same fixed prompts.
+        templates = create_prompt_templates()
+        print(f"[Rank {self.global_rank}] [Validation] Generating images at step {step}...")
+        self.model.eval()
+        
+        prompts = self.validation_prompts
+        
+        images = []
+        for i, prompt in enumerate(prompts):
+            sample_start_time = time.time()
+            # system_prompt = "Generate an image according to the text prompt."       # template
+            # instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
+            
+            input_prompt, uncon_prompt = generate_text_to_image_prompt(prompt, templates)
+
+            # build initial sequence
+            con_prompt_token = self.tokenizer(input_prompt)["input_ids"]
+            uncon_prompt_token = self.tokenizer(uncon_prompt)["input_ids"]
+
+            img_mask_token = add_break_line([MASK] * self.validation_params["seq_len"], self.validation_params["token_grid_height"], self.validation_params["token_grid_width"], new_number = NEW_LINE)
+            img_pred_token = [BOA] + [BOI] + img_mask_token + [EOI] + [EOA]
+
+            prompt_ids = torch.tensor(con_prompt_token + img_pred_token, device="cuda").unsqueeze(0)
+            uncon_ids = torch.tensor(uncon_prompt_token, device="cuda").unsqueeze(0)
+
+            code_start = len(con_prompt_token) + 2  # +2 for BOA and BOI
+            try:
+                
+                out_tokens = generate_image(
+                    self.model,
+                    prompt_ids,
+                    seq_len=self.validation_params["seq_len"],
+                    newline_every=self.validation_params["newline_every"],
+                    timesteps=64,
+                    temperature=1.0,        
+                    cfg_scale=4.0,
+                    uncon_ids=uncon_ids,
+                    code_start=code_start,
+                    refresh_interval=5,
+                    warmup_ratio=0.3, 
+                )
+
+                # Only rank 0 decodes and prepares WandB image
+                if self.global_rank == 0:
+                    img = decode_vq_to_image(
+                        out_tokens, 
+                        save_path=None, 
+                        vae_ckpt=None, 
+                        image_height=self.args.gen_image_size, 
+                        image_width=self.args.gen_image_size, 
+                        vqvae=self.vqvae
+                    )
+                    images.append(wandb.Image(img, caption=prompt))
+                    
+                    sample_elapsed_time = time.time() - sample_start_time
+                    print(f"[Rank 0] [Validation] Finished prompt {i+1}/{len(prompts)} (Time: {sample_elapsed_time:.2f}s)")
+                
+            except Exception as e:
+                print(f"[Rank {self.global_rank}] [Validation] Error generating image for prompt '{prompt}': {e}")
+        
+        if self.global_rank == 0 and self.args.use_wandb and images:
+            wandb.log({"val/generated_images": images}, step=step)
+            
+        self.model.train()
+        dist.barrier() # Sync after validation
+        
     def _dataset_func(self):
         print("[Solver] Loading Hugging Face Datasets...")
-        LOCAL_TRAIN_DIR = os.getenv('LOCAL_TRAIN_DIR', None)
-        LOCAL_VAL_DIR = os.getenv('LOCAL_VAL_DIR', None)
-        if LOCAL_TRAIN_DIR and os.path.exists(LOCAL_TRAIN_DIR):
-            from datasets import load_from_disk
-            train_ds = load_from_disk(LOCAL_TRAIN_DIR)
-        else:
-            print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
-            train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
+        # LOCAL_TRAIN_DIR = os.getenv('LOCAL_TRAIN_DIR', None)
+        # LOCAL_VAL_DIR = os.getenv('LOCAL_VAL_DIR', None)
+        # if LOCAL_TRAIN_DIR and os.path.exists(LOCAL_TRAIN_DIR):
+        #     from datasets import load_from_disk
+        #     train_ds = load_from_disk(LOCAL_TRAIN_DIR)
+        # else:
+        #     print(f"[Solver] Loading training dataset from Hugging Face Hub... : Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed")
+        #     train_ds = load_dataset("Jiwon-Kang/pixmo-point-count-concat_0-20-qaFixed", split="train")
+        
+        train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False)
             
         
         # Validation Dataset (Map-style) - Stored in self.val_ds
@@ -635,7 +835,11 @@ class Solver(FinetuneSolverBase):
             train_ds = train_ds.filter(lambda count: count >= args.count_lower_limit, input_columns=['count'], num_proc=64)
             self.val_ds_stream = self.val_ds_stream.filter(lambda count: count >= args.count_lower_limit, input_columns=['count'])
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
-        return HFDatasetWrapper(train_ds, item_processor, default_task=self.args.task)
+        
+        train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
+        train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
+        
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
         print(f"[Solver] Creating starting point at {save_path}...")
@@ -749,7 +953,7 @@ class Solver(FinetuneSolverBase):
                 if gt_count is None: continue # Skip if no GT count available
 
                 # Preprocess Image
-                crop_size_list = generate_crop_size_list((self.args.image_size // 32) ** 2, 32)
+                crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
                 image_processed = var_center_crop(image, crop_size_list=crop_size_list)
                 
                 # Encode Image
@@ -1051,7 +1255,8 @@ class Solver(FinetuneSolverBase):
 
     def train_one_epoch(self, epoch: int, start_iter: int, log_writer=None, metric_logger=None):
         if not hasattr(self, 'vqvae'):
-            print(f"[Solver] Loading VQ-VAE to {torch.cuda.current_device()}...")
+            if self.global_rank == 0:
+                print(f"[Solver] Loading VQ-VAE to {torch.cuda.current_device()}...")
             
             if self.args.precision == "bf16":
                 dtype = torch.bfloat16
@@ -1060,7 +1265,7 @@ class Solver(FinetuneSolverBase):
             else:
                 dtype = torch.float32
 
-            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to("cuda")
             self.vqvae.eval()
 
         self.model.train(True)
@@ -1076,6 +1281,15 @@ class Solver(FinetuneSolverBase):
         
         accumulated_loss = 0.0 # Initialize loss accumulator
 
+        # Pre-create Image Processor for Generation tasks to avoid redundant overhead
+        from diffusers.image_processor import VaeImageProcessor
+        vae_scale_factor = 2 ** (len(self.vqvae.config.block_out_channels) - 1)
+        image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_normalize=False)
+
+        # Import prompt utils for generation
+        from utils.prompt_utils import create_prompt_templates, generate_text_to_image_prompt
+        templates = create_prompt_templates()
+
         for data_iter_step, batch_data in enumerate(
             metric_logger.log_every(
                 self.dataloader_train,
@@ -1086,54 +1300,75 @@ class Solver(FinetuneSolverBase):
             ),
             start=start_iter,
         ):
-            # Unpack batch columns (collate_fn=zip gives tuple of tuples)
-            # images_tuple: (img1, img2, ...)
-            # questions_tuple: (q1, q2, ...)
-            # answers_tuple: (a1, a2, ...)
-            images_tuple, questions_tuple, answers_tuple = batch_data
-            
+            # Check task type by number of columns in batch_data
+            is_generation = (len(batch_data) == 2)
+
             input_ids_list = []
             labels_list = []
 
-            # Iterate over batch elements
+            if is_generation:
+                images_tuple, captions_tuple = batch_data
+            else:
+                images_tuple, questions_tuple, answers_tuple = batch_data
+
             for i in range(len(images_tuple)):
                 img = images_tuple[i]
-                question = questions_tuple[i]
-                answer = answers_tuple[i]
-
-                # A. Encode Image (GPU)
-                with torch.no_grad():
-                    image_tokens = encode_img_with_breaks(img, self.vqvae)
                 
-                # B. Prepare Text & Tokens
-                instruction = "<system>You are a multimodal model that can process both text and images. Answer the following question based on the provided images.</system>" + \
-                              "<user>" + question + "</user>"
-                instruction_token = self.tokenizer(instruction, truncation=True, max_length=1024, padding=False, return_tensors="pt").input_ids[0].tolist()
-                
-                # Insert Image Tokens (before EOS)
-                instruction_token = instruction_token[:-1] + image_tokens + instruction_token[-1:] # Insert before </user>
-                instruction_label = [-100] * len(instruction_token)
+                if is_generation:
+                    caption = captions_tuple[i]
+                    
+                    with torch.no_grad():
+                        x = image_processor.preprocess(img).to(device=self.vqvae.device, dtype=self.vqvae.dtype)
+                        latents = self.vqvae.encode(x).latents
+                        B, C, H, W = latents.shape
+                        quantized = self.vqvae.quantize(latents)[2][2] + IMAGE_TOKEN_OFFSET # Offset
+                        image_tokens_raw = quantized.reshape(B, H, W).flatten().tolist()
+                    
+                    masked_image_tokens, image_labels = mask_codes(image_tokens_raw)
 
-                # Answer
-                answer_text = answer + "</answer>"
-                answer_token = self.tokenizer(answer_text, truncation=True, max_length=1024, padding=False, return_tensors="pt").input_ids[0].tolist()
-                
-                answer_token, answer_label = mask_codes(answer_token)
+                    masked_image_tokens = add_break_line(masked_image_tokens, H, W, NEW_LINE)
+                    image_labels = add_break_line(image_labels, H, W, -100)
 
-                # Combine with BOA
-                final_input = instruction_token + [BOA] + answer_token
-                final_label = instruction_label + [-100] + answer_label
+                    input_prompt, uncond_prompt = generate_text_to_image_prompt(caption, templates)
+                    if np.random.rand() < 0.1:
+                        # 10% uncond
+                        input_prompt = uncond_prompt
+                    
+                    instruction_token = self.tokenizer(input_prompt, truncation=True, max_length=512, padding=False, return_tensors="pt").input_ids[0].tolist()
+                    instruction_label = [-100] * len(instruction_token)
+
+                    final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]                
+                    final_label = instruction_label + [-100] + [-100] + image_labels + [-100] + [-100]
+
+                else:
+                    question = questions_tuple[i]
+                    answer = answers_tuple[i]
+
+                    with torch.no_grad():
+                        image_tokens = encode_img_with_breaks(img, self.vqvae)
+                    
+                    instruction = "<system>You are a multimodal model that can process both text and images. Answer the following question based on the provided images.</system>" + \
+                                    "<user>" + question + "</user>"
+                    instruction_token = self.tokenizer(instruction, truncation=True, max_length=1024, padding=False, return_tensors="pt").input_ids[0].tolist()
+                    
+                    instruction_token = instruction_token[:-1] + image_tokens + instruction_token[-1:]
+                    instruction_label = [-100] * len(instruction_token)
+
+                    answer_text = answer + "</answer>"
+                    answer_token = self.tokenizer(answer_text, truncation=True, max_length=1024, padding=False, return_tensors="pt").input_ids[0].tolist()
+                    
+                    answer_token, answer_label = mask_codes(answer_token)
+
+                    final_input = instruction_token + [BOA] + answer_token
+                    final_label = instruction_label + [-100] + answer_label
                 
                 if len(final_input) > self.args.max_seq_len:
                     final_input = final_input[:self.args.max_seq_len]
                     final_label = final_label[:self.args.max_seq_len]
-                # print(f"instruction_token length: {len(instruction_token)}, answer_token length: {len(answer_token)}")
-                # print(f"final_input : {len(final_input)}, final_label : {len(final_label)}")
 
                 input_ids_list.append(final_input)
                 labels_list.append(final_label)
 
-            # Pass lists directly to model (it handles padding)
             examples = input_ids_list
             labels = labels_list
             
@@ -1154,16 +1389,15 @@ class Solver(FinetuneSolverBase):
             accumulated_loss += loss_value # Accumulate loss
 
             if not math.isfinite(loss_value):
-                print(f"[Rank {self.global_rank}] Loss is {loss_value}, stopping training")
-                print(f"[Rank {self.global_rank}] Input IDs (first sample, first 50): {examples[0][:50]}")
-                print(f"[Rank {self.global_rank}] Labels (first sample, first 50): {labels[0][:50]}")
-                print(f"[Rank {self.global_rank}] Input Min/Max: {min([min(x) for x in examples])}/{max([max(x) for x in examples])}")
+                if self.global_rank == 0:
+                    print(f"[Rank {self.global_rank}] Loss is {loss_value}, stopping training")
+                    print(f"[Rank {self.global_rank}] Input IDs (first sample, first 50): {examples[0][:50]}")
+                    print(f"[Rank {self.global_rank}] Labels (first sample, first 50): {labels[0][:50]}")
                 sys.exit(1)
 
             effective_loss = loss / accum_iter
             effective_loss.backward()
 
-            # Gradient Accumulation Step
             if (data_iter_step + 1) % accum_iter == 0:
                 if isinstance(self.model, FSDP):
                     self.model.clip_grad_norm_(max_norm=self.args.clip_grad)
@@ -1178,8 +1412,8 @@ class Solver(FinetuneSolverBase):
 
                 # --- WandB Logging per Step ---
                 if self.global_rank == 0 and self.args.use_wandb:
-                     avg_loss = accumulated_loss / accum_iter
-                     wandb.log({
+                    avg_loss = accumulated_loss / accum_iter
+                    wandb.log({
                         "train/loss": avg_loss,
                         "train/lr": self.optimizer.param_groups[0]["lr"],
                         "train/global_step": self.global_step,
@@ -1189,10 +1423,16 @@ class Solver(FinetuneSolverBase):
                 
                 # --- Step-based Validation ---
                 if self.global_step % self.args.validation_interval == 0:
-                     self.validate(epoch)
-                     if self.args.validation_as_pointing_format:
-                         self.validate(epoch, format="pointing")
-                     
+                    if self.args.mode in ['und', 'both']:
+                        self.validate(epoch)
+                        if self.args.validation_as_pointing_format:
+                            self.validate(epoch, format="pointing")
+                        
+                    if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
+                        if self.global_rank == 0:
+                            print("[Solver] Logging validation images on wandb...")
+                        self.log_validation_images(self.global_step)
+
                 # --- Step-based Saving ---
                 if self.global_step % self.args.save_iteration_interval == 0:
                      self.save_checkpoint(epoch, iteration=data_iter_step, global_step=self.global_step)
