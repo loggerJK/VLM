@@ -1,4 +1,3 @@
-export CUDA_VISIBLE_DEVICES=7
 
 # python inference/inference_t2i.py\
 #     --checkpoint Alpha-VLLM/Lumina-DiMOO \
@@ -59,19 +58,24 @@ export CUDA_VISIBLE_DEVICES=7
 #     --output_dir /mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_res512 \
 #     --prompt_files /mnt/data1/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 
-CUDA_VISIBLE_DEVICES=3 python inference/inference_t2i.py\
-    --checkpoint Alpha-VLLM/Lumina-DiMOO \
-    --height 1024 \
-    --width 1024 \
-    --timesteps 64 \
-    --cfg_scale 4.0 \
-    --seed 65513 \
-    --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --lora_ckpt_path /mnt/data1/jiwon/Lumina-DiMOO/output/lora128_counting_wohead/epoch6-iter45311-step12000 \
-    --output_dir /mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_epoch6-iter45311-step12000 \
-    --prompt_files /mnt/data1/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
+# CUDA_VISIBLE_DEVICES=3 python inference/inference_t2i.py\
+#     --checkpoint Alpha-VLLM/Lumina-DiMOO \
+#     --height 1024 \
+#     --width 1024 \
+#     --timesteps 64 \
+#     --cfg_scale 4.0 \
+#     --seed 65513 \
+#     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+#     --lora_ckpt_path /mnt/data1/jiwon/Lumina-DiMOO/output/lora128_counting_wohead/epoch6-iter45311-step12000 \
+#     --output_dir /mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_epoch6-iter45311-step12000 \
+#     --prompt_files /mnt/data1/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 
-CUDA_VISIBLE_DEVICES=3 python inference/inference_t2i.py\
+
+
+
+#############################################
+# evaluate position
+python inference/inference_t2i.py\
     --checkpoint Alpha-VLLM/Lumina-DiMOO \
     --height 1024 \
     --width 1024 \
@@ -79,6 +83,6 @@ CUDA_VISIBLE_DEVICES=3 python inference/inference_t2i.py\
     --cfg_scale 4.0 \
     --seed 65513 \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --lora_ckpt_path /mnt/data1/jiwon/Lumina-DiMOO/output/lora128_counting_wohead/epoch8-iter41215-step15400 \
-    --output_dir /mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_epoch8-iter41215-step15400 \
-    --prompt_files /mnt/data1/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
+    --output_dir /mnt/data1/heeji/geneval/position/baseline \
+    --prompt_files /mnt/data1/jiwon/geneval/prompts/prompts/evaluation_metadata_position.jsonl
+    # --lora_ckpt_path /mnt/cvlab22_data1/heeji/dVLM_outputs_from_ext_srv/lora128_spatial_relation_wohead_und-20260126-144357/epoch1-iter34431-step2500 \
