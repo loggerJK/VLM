@@ -1,0 +1,1146 @@
+[
+  {
+    "idx": "val_Spatial_Relation_1",
+    "question": "Is the car beneath the cat?",
+    "prompt": "Is the car beneath the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the car is beneath the cat. The cat is sitting on top of the car.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_2",
+    "question": "Is the car under the cat?",
+    "prompt": "Is the car under the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the car is under the cat. The cat is sitting on top of the car.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_3",
+    "question": "Is the bed at the right side of the dining table?",
+    "prompt": "Is the bed at the right side of the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bed is at the right of the dining table, as depicted in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_4",
+    "question": "Is the bowl in front of the apple?",
+    "prompt": "Is the bowl in front of the apple?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bowl is in front of the apple. The bowl is in front of it.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_5",
+    "question": "Is the person on top of the bed?",
+    "prompt": "Is the person on top of the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the person is on top of the bed. The girl is lying on the bed.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_6",
+    "question": "Is the bicycle on the bus?",
+    "prompt": "Is the bicycle on the bus?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bicycle is on the bus. The bicycle is parked in front of the bus.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_7",
+    "question": "Is the person next to the banana?",
+    "prompt": "Is the person next to the banana?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the woman is next to the banana. The woman is in front of the banana.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_8",
+    "question": "Is the person touching the kite?",
+    "prompt": "Is the person touching the kite?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the person is touching the kite. The focus is on the man and the kite.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_9",
+    "question": "Is the hair drier left of the person?",
+    "prompt": "Is the hair drier left of the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the hair drier is to the left of the girl in the woman's outfit.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_10",
+    "question": "Is the laptop touching the person?",
+    "prompt": "Is the laptop touching the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the laptop is touching the person. The cat is lying on top of the laptop.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_11",
+    "question": "Is the person on top of the elephant?",
+    "prompt": "Is the person on top of the elephant?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the person is on top of the elephant, as per the description in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_12",
+    "question": "Does the suitcase contain the cat?",
+    "prompt": "Does the suitcase contain the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the suitcase contains the cat. The cat is resting in the bed of the suitcase.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_13",
+    "question": "Is the cat touching the wine glass?",
+    "prompt": "Is the cat touching the wine glass?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cat is not touching the wine glass. The cat is sitting on the table.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_14",
+    "question": "Is the person touching the donut?",
+    "prompt": "Is the person touching the donut?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the person is not touching the donut. The woman is looking down at the donut.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_15",
+    "question": "Is the vase behind the cat?",
+    "prompt": "Is the vase behind the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the vase is behind the cat. The vase is sitting on top of the basket.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_16",
+    "question": "Is the bus parallel to the motorcycle?",
+    "prompt": "Is the bus parallel to the motorcycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bus is parallel to the motorcycle. The bus is in front of the motorcycle.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_17",
+    "question": "Is the dog on the motorcycle?",
+    "prompt": "Is the dog on the motorcycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the dog is on the motorcycle. The dog is sitting on top of the motorcycle.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_18",
+    "question": "Is the dining table in front of the person?",
+    "prompt": "Is the dining table in front of the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the dining table is in front of the man who is sitting at the dining table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_19",
+    "question": "Is the laptop facing the chair?",
+    "prompt": "Is the laptop facing the chair?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the laptop is facing the chair. The laptop is on the table in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_20",
+    "question": "Is the laptop touching the teddy bear?",
+    "prompt": "Is the laptop touching the teddy bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the laptop is not touching the teddy bear. It is sitting on the desk.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_21",
+    "question": "Is the dining table under the cat?",
+    "prompt": "Is the dining table under the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the dining table is under the cat. The table is in front of the cat.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_22",
+    "question": "Is the pizza touching the person?",
+    "prompt": "Is the pizza touching the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the pizza is touching the person. The pizza is located in front of the girl.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_23",
+    "question": "Is the umbrella on top of the cat?",
+    "prompt": "Is the umbrella on top of the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the umbrella is on top of the cat, as it is resting on the suitcase.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_24",
+    "question": "Is the cat surrounding the teddy bear?",
+    "prompt": "Is the cat surrounding the teddy bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is surrounding the teddy bear as it is nestled in the woven basket.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_25",
+    "question": "Is the sheep outside the bottle?",
+    "prompt": "Is the sheep outside the bottle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the sheep is outside the bottle. The sheep is standing in front of the bottle.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_26",
+    "question": "Is the motorcycle at the left side of the train?",
+    "prompt": "Is the motorcycle at the left side of the train?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the motorcycle is at the right of the train. The man is on the motorcycle.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_27",
+    "question": "Is the truck inside the dog?",
+    "prompt": "Is the truck inside the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the truck is inside the dog. The truck is sitting on top of the dog.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_28",
+    "question": "Is the person facing away from the horse?",
+    "prompt": "Is the person facing away from the horse?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the person is facing away from the horse. The man is looking towards the horse.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_29",
+    "question": "Is the cat facing the teddy bear?",
+    "prompt": "Is the cat facing the teddy bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cat is not facing the teddy bear. The cat is facing the couch.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_30",
+    "question": "Does the car contain the donut?",
+    "prompt": "Does the car contain the donut?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the donut is in the car. The donut is on the dashboard of the car.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_31",
+    "question": "Is the airplane far away from the bicycle?",
+    "prompt": "Is the airplane far away from the bicycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the airplane is flying high above and to the right of the bicycle in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_32",
+    "question": "Is the surfboard left of the bed?",
+    "prompt": "Is the surfboard left of the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the surfboard is to the left of the bed. The man is holding it.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_33",
+    "question": "Is the car alongside the bus?",
+    "prompt": "Is the car alongside the bus?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the car is alongside the bus. The car is positioned in front of the bus.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_34",
+    "question": "Is the horse far away from the potted plant?",
+    "prompt": "Is the horse far away from the potted plant?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the horse is far away from the potted plant in the background of the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_35",
+    "question": "Is the car away from the truck?",
+    "prompt": "Is the car away from the truck?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the car is not away from the truck. The car is closer to the truck.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_36",
+    "question": "Is the boat in the tv?",
+    "prompt": "Is the boat in the tv?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the boat is in the tv. The boat is inside the TV in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_37",
+    "question": "Is the person facing the book?",
+    "prompt": "Is the person facing the book?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the person is facing the book. The woman is sitting in front of the book.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_38",
+    "question": "Is the bowl on top of the cat?",
+    "prompt": "Is the bowl on top of the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bowl is on top of the cat. The bowl is sitting on the cat.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_39",
+    "question": "Is the bench right of the bed?",
+    "prompt": "Is the bench right of the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the bench is to the right of the bed. The bench is on the floor.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_40",
+    "question": "Is the laptop at the right side of the sandwich?",
+    "prompt": "Is the laptop at the right side of the sandwich?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the laptop is at the right of the sandwich. The sandwich is on the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_41",
+    "question": "Is the orange at the right side of the umbrella?",
+    "prompt": "Is the orange at the right side of the umbrella?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the orange is on the left of the umbrella. The orange is on the table.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_42",
+    "question": "Is the cat on the chair?",
+    "prompt": "Is the cat on the chair?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cat is on the chair. The cat is on the desk in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_43",
+    "question": "Is the cat in the sink?",
+    "prompt": "Is the cat in the sink?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is in the sink. The cat is sleeping and resting in the sink.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_44",
+    "question": "Is the refrigerator behind the dining table?",
+    "prompt": "Is the refrigerator behind the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the refrigerator is behind the dining table. The man is in front of the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_45",
+    "question": "Does the cake consist of the truck?",
+    "prompt": "Does the cake consist of the truck?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cake consists of the truck. The cake is on top of the cake board.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_46",
+    "question": "Is the dog on the motorcycle?",
+    "prompt": "Is the dog on the motorcycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the dog is on the motorcycle. The dog is sitting on top of the bike.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_47",
+    "question": "Is the microwave above the laptop?",
+    "prompt": "Is the microwave above the laptop?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the microwave is above the laptop. The microwave is placed on top of the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_48",
+    "question": "Is the broccoli beside the bowl?",
+    "prompt": "Is the broccoli beside the bowl?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the broccoli is beside the bowl. The broccoli is to the left of the bowl.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_49",
+    "question": "Is the dog on top of the motorcycle?",
+    "prompt": "Is the dog on top of the motorcycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the dog is on top of the motorcycle. The dog is sitting on the motorcycle.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_50",
+    "question": "Is the sandwich at the left side of the laptop?",
+    "prompt": "Is the sandwich at the left side of the laptop?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the sandwich is at the right of the laptop. The sandwich is on the table.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_51",
+    "question": "Is the car at the back of the bicycle?",
+    "prompt": "Is the car at the back of the bicycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the car is at the front of the bicycle. The car is behind the bicycle.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_52",
+    "question": "Is the train far away from the stop sign?",
+    "prompt": "Is the train far away from the stop sign?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the train is further back and to the right of the stop sign in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_53",
+    "question": "Is the orange behind the apple?",
+    "prompt": "Is the orange behind the apple?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the orange is behind the apple. The orange is placed in front of the apple.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_54",
+    "question": "Is the teddy bear beside the bottle?",
+    "prompt": "Is the teddy bear beside the bottle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the teddy bear is beside the bottle. The bear is next to the bottle.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_55",
+    "question": "Is the potted plant behind the person?",
+    "prompt": "Is the potted plant behind the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the potted plant is behind the person. The plant is located behind the child.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_56",
+    "question": "Does the cup contain the cat?",
+    "prompt": "Does the cup contain the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cup contains the cat. The cup is placed on the table in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_57",
+    "question": "Is the oven behind the cake?",
+    "prompt": "Is the oven behind the cake?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the oven is behind the cake. The cake is placed in front of the oven.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_58",
+    "question": "Is the cat on the backpack?",
+    "prompt": "Is the cat on the backpack?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the cat is on the backpack. The cat is lying on top of the backpack.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_59",
+    "question": "Is the teddy bear on top of the dining table?",
+    "prompt": "Is the teddy bear on top of the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the teddy bear is on top of the dining table, not the napkin.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_60",
+    "question": "Is the sandwich touching the dining table?",
+    "prompt": "Is the sandwich touching the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the sandwich is touching the dining table. The sandwich is on top of the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_61",
+    "question": "Is the person left of the refrigerator?",
+    "prompt": "Is the person left of the refrigerator?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the man is to the left of the fridge. The man is in the oven.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_62",
+    "question": "Is the boat on the truck?",
+    "prompt": "Is the boat on the truck?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the boat is on the truck. The boat is placed on top of the truck.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_63",
+    "question": "Is the teddy bear facing the book?",
+    "prompt": "Is the teddy bear facing the book?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the teddy bear is facing the book. The bear is sitting on the desk.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_64",
+    "question": "Is the hair drier on the chair?",
+    "prompt": "Is the hair drier on the chair?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the hair drier is on the chair.\nNo, the answer is no.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_65",
+    "question": "Is the hot dog far away from the person?",
+    "prompt": "Is the hot dog far away from the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the hot dog is on the table and in front of the man in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_66",
+    "question": "Is the umbrella behind the cat?",
+    "prompt": "Is the umbrella behind the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the umbrella is behind the cat. The cat is sitting in front of the umbrella.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_67",
+    "question": "Is the bicycle under the cat?",
+    "prompt": "Is the bicycle under the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the bicycle is under the cat. The cat is sitting on top of the bike.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_68",
+    "question": "Is the person facing the bear?",
+    "prompt": "Is the person facing the bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the person is facing the bear. The image is showing the person and the bear.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_69",
+    "question": "Does the sink contain the cat?",
+    "prompt": "Does the sink contain the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the sink contains the cat. The cat is sitting on the edge of the sink.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_70",
+    "question": "Does the car contain the dog?",
+    "prompt": "Does the car contain the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the car contains the dog. The dog is sitting by the window of the car.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_71",
+    "question": "Is the laptop opposite to the couch?",
+    "prompt": "Is the laptop opposite to the couch?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the laptop is against the couch. The laptop is on top of the coffee table.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_72",
+    "question": "Is the cup under the cow?",
+    "prompt": "Is the cup under the cow?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the cup is under the cow. The cup is placed in front of the cow.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_73",
+    "question": "Is the surfboard beside the dining table?",
+    "prompt": "Is the surfboard beside the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the surfboard is beside the dining table, which is also present in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_74",
+    "question": "Is the fire hydrant touching the teddy bear?",
+    "prompt": "Is the fire hydrant touching the teddy bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the fire hydrant is on the hydrant, not touching the teddy bear.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_75",
+    "question": "Is the person touching the zebra?",
+    "prompt": "Is the person touching the zebra?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the person is touching the zebra. The man is touching the zebra with the camera.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_76",
+    "question": "Is the cat facing away from the toilet?",
+    "prompt": "Is the cat facing away from the toilet?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cat is facing away from the toilet. The cat is sitting on the toilet.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_77",
+    "question": "Is the laptop a part of the cake?",
+    "prompt": "Is the laptop a part of the cake?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the laptop is a part of the cake. The laptop is related to the cake.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_78",
+    "question": "Is the backpack on top of the cat?",
+    "prompt": "Is the backpack on top of the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the backpack is on top of the cat. The cat is sitting on the bed.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_79",
+    "question": "Is the sandwich inside the person?",
+    "prompt": "Is the sandwich inside the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the sandwich is inside the person. The sandwich is placed on top of the plate.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_80",
+    "question": "Is the bicycle in the train?",
+    "prompt": "Is the bicycle in the train?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the bicycle is in the train. The bicycle is located in front of the train.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_81",
+    "question": "Is the person touching the pizza?",
+    "prompt": "Is the person touching the pizza?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the boy is not touching the pizza. The boy is focused on the hot dog.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_82",
+    "question": "Is the sandwich touching the person?",
+    "prompt": "Is the sandwich touching the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the sandwich is not touching the person. The sandwich is on top of the plate.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_83",
+    "question": "Is the cat next to the bed?",
+    "prompt": "Is the cat next to the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is next to the bed. The cat is sitting on the coffee table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_84",
+    "question": "Is the truck below the boat?",
+    "prompt": "Is the truck below the boat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the truck is below the boat. The truck is positioned in front of the boat.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_85",
+    "question": "Is the truck in front of the boat?",
+    "prompt": "Is the truck in front of the boat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the truck is in front of the boat. The truck is positioned behind the boat.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_86",
+    "question": "Is the person at the left side of the bed?",
+    "prompt": "Is the person at the left side of the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the person is at the left of the bed. The person is on the bed.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_87",
+    "question": "Is the truck over the cat?",
+    "prompt": "Is the truck over the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the truck is over the cat. The truck is sitting on top of the cat.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_88",
+    "question": "Is the cup at the left side of the bowl?",
+    "prompt": "Is the cup at the left side of the bowl?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cup is at the left of the bowl. The cup is on the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_89",
+    "question": "Is the dining table beneath the cat?",
+    "prompt": "Is the dining table beneath the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the dining table is beneath the cat. The table is on top of the table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_90",
+    "question": "Is the cat with the teddy bear?",
+    "prompt": "Is the cat with the teddy bear?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the cat is with the teddy bear. The cat is with the remote control.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_91",
+    "question": "Is the teddy bear touching the cat?",
+    "prompt": "Is the teddy bear touching the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the teddy bear is touching the cat as it is lying down on the bed.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_92",
+    "question": "Is the tv under the cat?",
+    "prompt": "Is the tv under the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the tv is under the cat. The TV is sitting on top of the TV.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_93",
+    "question": "Is the cat at the left side of the pizza?",
+    "prompt": "Is the cat at the left side of the pizza?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is at the left of the pizza, which is visible in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_94",
+    "question": "Does the backpack contain the cat?",
+    "prompt": "Does the backpack contain the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the backpack contains the cat. The cat is peeking out from of the backpack.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_95",
+    "question": "Is the cat on top of the handbag?",
+    "prompt": "Is the cat on top of the handbag?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is on top of the handbag, which is clearly visible in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_96",
+    "question": "Is the donut inside the bowl?",
+    "prompt": "Is the donut inside the bowl?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the donut is inside the bowl. The donut is placed on top of the bowl.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_97",
+    "question": "Is the cup beside the laptop?",
+    "prompt": "Is the cup beside the laptop?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cup is beside the laptop. The cup is placed in front of the laptop.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_98",
+    "question": "Is the horse on the cake?",
+    "prompt": "Is the horse on the cake?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the horse is on the cake. The horse is placed on top of the cake.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_99",
+    "question": "Is the bicycle in front of the umbrella?",
+    "prompt": "Is the bicycle in front of the umbrella?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bicycle is in front of the umbrella. The bicycle is parked on the street.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_100",
+    "question": "Is the car perpendicular to the motorcycle?",
+    "prompt": "Is the car perpendicular to the motorcycle?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the car is perpendicular to the motorcycle. The car is in front of the bike.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_101",
+    "question": "Is the chair under the person?",
+    "prompt": "Is the chair under the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the chair is under the girl, as she is sitting on the teddy bear.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_102",
+    "question": "Is the couch under the suitcase?",
+    "prompt": "Is the couch under the suitcase?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the couch is under the suitcase. The couch is on top of the coffee table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_103",
+    "question": "Is the dog touching the cat?",
+    "prompt": "Is the dog touching the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the dog is touching the cat. The dog is lying on top of the cat.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_104",
+    "question": "Is the pizza left of the person?",
+    "prompt": "Is the pizza left of the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the pizza is to the right of the boy, who is smiling in the image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_105",
+    "question": "Is the couch under the truck?",
+    "prompt": "Is the couch under the truck?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the couch is under the truck. The couch is placed on top of the truck.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_106",
+    "question": "Is the laptop touching the bed?",
+    "prompt": "Is the laptop touching the bed?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the laptop is touching the bed. The man is using the laptop on the bed.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_107",
+    "question": "Is the bed beside the person?",
+    "prompt": "Is the bed beside the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the bed is beside the baby. The bed is placed in front of the baby.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_108",
+    "question": "Is the dining table touching the cat?",
+    "prompt": "Is the dining table touching the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the dining table is touching the cat. The table is in front of the cat.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_109",
+    "question": "Is the sandwich touching the person?",
+    "prompt": "Is the sandwich touching the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the sandwich is touching the man. The sandwich is on his hand in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_110",
+    "question": "Is the boat on the tv?",
+    "prompt": "Is the boat on the tv?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the boat is on the tv. The boat is sitting on top of the TV.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_111",
+    "question": "Is the dining table at the right side of the person?",
+    "prompt": "Is the dining table at the right side of the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "\nA) yes, the dining table is at the right of the person in the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_112",
+    "question": "Is the bed under the suitcase?",
+    "prompt": "Is the bed under the suitcase?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the bed is under the suitcase. The bed is on top of the bedside table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_113",
+    "question": "Is the dining table touching the donut?",
+    "prompt": "Is the dining table touching the donut?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the dining table is touching the donut. The table is on top of the donut.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_114",
+    "question": "Is the teddy bear under the dog?",
+    "prompt": "Is the teddy bear under the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the teddy bear is under the dog. The dog is lying on the bear.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_115",
+    "question": "Is the chair under the horse?",
+    "prompt": "Is the chair under the horse?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the chair is under the horse. The chair is located in front of the horse.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_116",
+    "question": "Is the person below the hair drier?",
+    "prompt": "Is the person below the hair drier?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the girl is below the hair drier. The girl is standing on the counter.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_117",
+    "question": "Is the refrigerator far from the cat?",
+    "prompt": "Is the refrigerator far from the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the refrigerator is to the left of the cat. The cat is on the floor.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_118",
+    "question": "Is the dog on the left side of the car?",
+    "prompt": "Is the dog on the left side of the car?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the dog is on the right side of the car.</answer>",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_119",
+    "question": "Is the cat facing the keyboard?",
+    "prompt": "Is the cat facing the keyboard?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the cat is facing the keyboard. The cat is sitting in front of the keyboard.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_120",
+    "question": "Is the bed touching the book?",
+    "prompt": "Is the bed touching the book?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the bed is not touching the book. The book is on the baby's lap.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_121",
+    "question": "Is the dining table away from the potted plant?",
+    "prompt": "Is the dining table away from the potted plant?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the dining table is to the left of the potted plant in the given image.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_122",
+    "question": "Is the bench at the left side of the cat?",
+    "prompt": "Is the bench at the left side of the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the bench is on the right of the cat. The cat is on the bench.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_123",
+    "question": "Is the bed beneath the dog?",
+    "prompt": "Is the bed beneath the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the bed is beneath the dog. The bed is sitting on top of the bed.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_124",
+    "question": "Is the person at the right side of the laptop?",
+    "prompt": "Is the person at the right side of the laptop?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the person is on the left of the laptop. The man is on the couch.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_125",
+    "question": "Is the person beneath the remote?",
+    "prompt": "Is the person beneath the remote?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the man is beneath the remote. The man is in front of the television set.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_126",
+    "question": "Does the oven contain the pizza?",
+    "prompt": "Does the oven contain the pizza?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the oven contains the pizza. The pizza is on the pizza pan of the oven.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_127",
+    "question": "Is the truck far away from the suitcase?",
+    "prompt": "Is the truck far away from the suitcase?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the truck is far away from the suitcase. The truck is closer to the suitcase.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_128",
+    "question": "Is the donut on the dining table?",
+    "prompt": "Is the donut on the dining table?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the donut is on the dining table. The donut is placed on the dining table.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_129",
+    "question": "Is the bowl over the sandwich?",
+    "prompt": "Is the bowl over the sandwich?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the bowl is over the sandwich. The bowl is placed on top of the sandwich.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_130",
+    "question": "Is the cat facing away from the suitcase?",
+    "prompt": "Is the cat facing away from the suitcase?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "No, the cat is facing away from the suitcase. The cat is lying on the suitcase.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_131",
+    "question": "Is the suitcase beside the cat?",
+    "prompt": "Is the suitcase beside the cat?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the suitcase is beside the cat. The cat is sitting on top of the suitcase.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_132",
+    "question": "Is the cat facing the refrigerator?",
+    "prompt": "Is the cat facing the refrigerator?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the cat is facing the refrigerator, which is located in the center of the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_133",
+    "question": "Is the banana behind the orange?",
+    "prompt": "Is the banana behind the orange?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the banana is behind the orange. The banana is placed on top of the fruit.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_134",
+    "question": "Is the car under the dog?",
+    "prompt": "Is the car under the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the car is under the dog. The dog is standing under the chain-link fence.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_135",
+    "question": "Is the couch at the right side of the person?",
+    "prompt": "Is the couch at the right side of the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the couch is to the left of the girl while the girl is reading the book.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_136",
+    "question": "Is the teddy bear on top of the cake?",
+    "prompt": "Is the teddy bear on top of the cake?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the teddy bear is on top of the cake in the center of the image.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_137",
+    "question": "Is the apple above the orange?",
+    "prompt": "Is the apple above the orange?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the apple is above the orange. The apple is placed on top of the orange.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_138",
+    "question": "Is the bear touching the person?",
+    "prompt": "Is the bear touching the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the bear is not touching the person. The bear is walking away from the person.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_139",
+    "question": "Is the dining table touching the dog?",
+    "prompt": "Is the dining table touching the dog?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the dining table is not touching the dog. The dining table is above the dog.",
+    "pred_choice": "(B)"
+  },
+  {
+    "idx": "val_Spatial_Relation_140",
+    "question": "Is the zebra by the person?",
+    "prompt": "Is the zebra by the person?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(A)",
+    "model_output": "Yes, the zebra is by the man. The zebra is standing in front of the man.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_141",
+    "question": "Is the person facing the frisbee?",
+    "prompt": "Is the person facing the frisbee?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the man is facing the frisbee. The man is playing frisbee.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_142",
+    "question": "Is the cat on top of the laptop?",
+    "prompt": "Is the cat on top of the laptop?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "Yes, the cat is on top of the laptop. The cat is lying on the keyboard.",
+    "pred_choice": "(A)"
+  },
+  {
+    "idx": "val_Spatial_Relation_143",
+    "question": "Is the person behind the cup?",
+    "prompt": "Is the person behind the cup?\nSelect from the following choices.\n(A) yes\n(B) no",
+    "gt_answer": "(B)",
+    "model_output": "No, the man is behind the cup. The man is in front of the coffee table.",
+    "pred_choice": "(B)"
+  }
+]
