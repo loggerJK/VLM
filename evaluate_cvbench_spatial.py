@@ -40,39 +40,63 @@ def set_all_seeds(seed):
     
 
 def extract_choice(text, choices=None):
-    """Extract (A) or (B) from the model output."""
+    """
+    Extracts the choice from the model output, mapping it to (A) or (B).
+    It first robustly checks for the text of the choices (e.g., 'left', 'right')
+    and then falls back to searching for '(A)' or '(B)' or a standalone 'A' or 'B'.
+    """
     if not text:
         return None
     
-    clean_text = text.strip()
+    clean_text_lower = text.strip().lower()
 
-    # Check for Yes/No if choices are provided
-    if choices and len(choices) >= 2:
-        first_choice = str(choices[0]).lower()
-        second_choice = str(choices[1]).lower()
+    # 1. Check if the output text matches one of the given choices.
+    if choices and len(choices) == 2:
+        choice_a_text = str(choices[0]).lower()
+        choice_b_text = str(choices[1]).lower()
+
+        # Use lookarounds to match whole words/phrases.
+        # This prevents matching substrings inside other words (e.g., 'right' in 'copyright').
+        pattern_a = r'(?<!\w)' + re.escape(choice_a_text) + r'(?!\w)'
+        pattern_b = r'(?<!\w)' + re.escape(choice_b_text) + r'(?!\w)'
+
+        found_a = re.search(pattern_a, clean_text_lower)
+        found_b = re.search(pattern_b, clean_text_lower)
         
-        if first_choice == 'yes' and second_choice == 'no':
-            if clean_text.lower().startswith('yes'):
+        # If both are found, the one that appears first is chosen.
+        if found_a and found_b:
+            if found_a.start() < found_b.start():
                 return "(A)"
-            if clean_text.lower().startswith('no'):
+            else:
                 return "(B)"
-        
-    # 1. Try to find (A) or (B)
-    match = re.search(r'\(([A-B])\)', text)
-    if match:
-        return f"({match.group(1)})"
-    
-    # 2. Try to find A or B if they are at the very beginning
-    if clean_text.startswith('A'):
-        return "(A)"
-    if clean_text.startswith('B'):
-        return "(B)"
+        elif found_a:
+            return "(A)"
+        elif found_b:
+            return "(B)"
 
-    # 3. Look for standalone A or B
-    match = re.search(r'\b([A-B])\b', text)
+    # 2. If no choice text is found, fall back to extracting letter identifiers (A/B).
+    
+    # Search for (A) or (B), case-insensitive. This is the most explicit form.
+    match = re.search(r'\(([A-B])\)', text, re.IGNORECASE)
     if match:
-        return f"({match.group(1)})"
-        
+        return f"({match.group(1).upper()})"
+    
+    # Search for A or B at the start of the string, not followed by another letter.
+    # This handles "A." or "A is correct".
+    stripped_text = text.strip()
+    if stripped_text: # check if not empty
+        first_char = stripped_text[0].upper()
+        if first_char in ['A', 'B']:
+            if len(stripped_text) == 1 or not stripped_text[1].isalpha():
+                return f"({first_char})"
+
+    # As a last resort, find the last standalone 'A' or 'B' in the text.
+    # This is common in phrases like "The answer is A".
+    matches = re.findall(r'\b([A-B])\b', text, re.IGNORECASE)
+    if matches:
+        last_match = matches[-1].upper()
+        return f"({last_match})"
+
     return None
 
 def main():
@@ -95,9 +119,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load Dataset
-    print(f"Loading BLINK Spatial_Relation dataset (split: {args.split})...")
+    print(f"Loading CVBench spatial relation dataset (split: {args.split})...")
     try:
         dataset = load_dataset("nyu-visionx/CV-Bench", "2D", split="test")
+        original_len = len(dataset)
+        dataset = dataset.filter(lambda x: x['task'] == 'Relation')
+        print(f"Filtered dataset to keep only 'Relation' task. {len(dataset)} examples (from {original_len}).")
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
@@ -128,7 +155,7 @@ def main():
 
     print("Starting inference...")
     for i, item in tqdm(enumerate(dataset), total=len(dataset)):
-        image = item['image_1']
+        image = item['image']
         # The prompt field usually contains the question and choices
         prompt_text = item['prompt']
         gt_answer = item['answer'] # e.g., "(B)"
