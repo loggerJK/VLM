@@ -235,17 +235,6 @@ def main():
     accuracy = accuracy_score(true_labels, pred_labels)
     print(f"\nTotal Accuracy: {accuracy:.4f}")
     
-    # Confusion Matrix
-    labels = ["(A)", "(B)"]
-    cm = confusion_matrix(true_labels, pred_labels, labels=labels)
-    
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', xticklabels=labels, yticklabels=labels, cmap='Blues')
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title(f'BLINK Spatial Relation Confusion Matrix\nAcc: {accuracy:.4f}')
-    plt.savefig(os.path.join(args.output_dir, "confusion_matrix.png"))
-    
     # Save raw results
     with open(os.path.join(args.output_dir, "results.json"), "w") as f:
         json.dump(results, f, indent=2)

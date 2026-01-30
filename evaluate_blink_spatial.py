@@ -131,6 +131,7 @@ def main():
         image = item['image_1']
         # The prompt field usually contains the question and choices
         prompt_text = item['prompt']
+        prompt_text = item['question']
         gt_answer = item['answer'] # e.g., "(B)"
         choices = item.get('choices', None)
         

@@ -39,63 +39,58 @@ def set_all_seeds(seed):
     set_seed(seed)
     
 
-def extract_choice(text, choices=None):
+def extract_choice(text, choices):
     """
-    Extracts the choice from the model output, mapping it to (A) or (B).
-    It first robustly checks for the text of the choices (e.g., 'left', 'right')
-    and then falls back to searching for '(A)' or '(B)' or a standalone 'A' or 'B'.
+    Extracts the choice from the model output, mapping it to (A), (B), (C), etc.
+    It restricts the search to the valid range of choices provided.
     """
     if not text:
         return None
     
     clean_text_lower = text.strip().lower()
+    valid_indices = range(len(choices)) if choices else range(26) # Default to A-Z if no choices given (fallback)
+    valid_letters = [chr(ord('A') + i) for i in valid_indices]
 
-    # 1. Check if the output text matches one of the given choices.
-    if choices and len(choices) == 2:
-        choice_a_text = str(choices[0]).lower()
-        choice_b_text = str(choices[1]).lower()
-
-        # Use lookarounds to match whole words/phrases.
-        # This prevents matching substrings inside other words (e.g., 'right' in 'copyright').
-        pattern_a = r'(?<!\w)' + re.escape(choice_a_text) + r'(?!\w)'
-        pattern_b = r'(?<!\w)' + re.escape(choice_b_text) + r'(?!\w)'
-
-        found_a = re.search(pattern_a, clean_text_lower)
-        found_b = re.search(pattern_b, clean_text_lower)
+    # 1. Check if the output text matches one of the given choices content.
+    if choices:
+        found_matches = []
+        for i, choice in enumerate(choices):
+            choice_text = str(choice).lower()
+            # Use lookarounds to match whole words/phrases.
+            pattern = r'(?<!\w)' + re.escape(choice_text) + r'(?!\w)'
+            match = re.search(pattern, clean_text_lower)
+            if match:
+                found_matches.append((match.start(), chr(ord('A') + i)))
         
-        # If both are found, the one that appears first is chosen.
-        if found_a and found_b:
-            if found_a.start() < found_b.start():
-                return "(A)"
-            else:
-                return "(B)"
-        elif found_a:
-            return "(A)"
-        elif found_b:
-            return "(B)"
+        # If matches are found, the one that appears first is chosen.
+        if found_matches:
+            found_matches.sort()
+            return f"({found_matches[0][1]})"
 
-    # 2. If no choice text is found, fall back to extracting letter identifiers (A/B).
+    # 2. If no choice text is found, fall back to extracting letter identifiers (A, B, C...).
+    # We only accept letters that are valid for the given choices.
     
-    # Search for (A) or (B), case-insensitive. This is the most explicit form.
-    match = re.search(r'\(([A-B])\)', text, re.IGNORECASE)
-    if match:
-        return f"({match.group(1).upper()})"
+    # Search for (X), case-insensitive.
+    matches = re.findall(r'\(([A-Z])\)', text, re.IGNORECASE)
+    for m in matches:
+        if m.upper() in valid_letters:
+            return f"({m.upper()})"
     
-    # Search for A or B at the start of the string, not followed by another letter.
-    # This handles "A." or "A is correct".
+    # Search for X at the start of the string.
     stripped_text = text.strip()
-    if stripped_text: # check if not empty
+    if stripped_text:
         first_char = stripped_text[0].upper()
-        if first_char in ['A', 'B']:
+        if first_char in valid_letters:
             if len(stripped_text) == 1 or not stripped_text[1].isalpha():
                 return f"({first_char})"
 
-    # As a last resort, find the last standalone 'A' or 'B' in the text.
-    # This is common in phrases like "The answer is A".
-    matches = re.findall(r'\b([A-B])\b', text, re.IGNORECASE)
+    # Find the last standalone letter in the text.
+    matches = re.findall(r'\b([A-Z])\b', text, re.IGNORECASE)
     if matches:
-        last_match = matches[-1].upper()
-        return f"({last_match})"
+        # Check in reverse order
+        for m in reversed(matches):
+            if m.upper() in valid_letters:
+                return f"({m.upper()})"
 
     return None
 
@@ -119,12 +114,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load Dataset
-    print(f"Loading CVBench spatial relation dataset (split: {args.split})...")
+    print(f"Loading CVBench counting dataset (split: {args.split})...")
     try:
         dataset = load_dataset("nyu-visionx/CV-Bench", "2D", split="test")
         original_len = len(dataset)
-        dataset = dataset.filter(lambda x: x['task'] == 'Relation')
-        print(f"Filtered dataset to keep only 'Relation' task. {len(dataset)} examples (from {original_len}).")
+        dataset = dataset.filter(lambda x: x['task'] == 'Counting')
+        print(f"Filtered dataset to keep only 'Counting' task. {len(dataset)} examples (from {original_len}).")
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
@@ -156,12 +151,18 @@ def main():
     print("Starting inference...")
     for i, item in tqdm(enumerate(dataset), total=len(dataset)):
         image = item['image']
-        # The prompt field usually contains the question and choices
-        # prompt_text = item['prompt']
-        prompt_text = item['question'] + " " + " or ".join([f"{ch}" for j, ch in enumerate(item.get('choices', []))])
+        prompt_text_raw = item['prompt']
         gt_answer = item['answer'] # e.g., "(B)"
-        choices = item.get('choices', None)
+        choices = item.get('choices', [])
         
+        # Construct prompt with choices
+        prompt_text = prompt_text_raw
+        if choices:
+            prompt_text += "\nSelect from the following choices."
+            for c_idx, choice in enumerate(choices):
+                letter = chr(ord('A') + c_idx)
+                prompt_text += f"\n({letter}) {choice}"
+
         # Prepare Input
         input_prompt = generate_multimodal_understanding_prompt(prompt_text)
         input_ids = tokenizer(input_prompt)['input_ids']
@@ -210,7 +211,7 @@ def main():
         true_labels.append(gt_answer)
         # If extraction fails, we mark it as incorrect by providing something that won't match
         # print question, gt_answer, pred_choice
-        print(f"Q: {prompt_text} \n Choices: {choices} \n GT: {gt_answer} \n Model Answer: {text_new} \n Pred: {pred_choice}")
+        print(f"Q: {prompt_text} \n GT: {gt_answer} \n Model Answer: {text_new} \n Pred: {pred_choice}")
         pred_labels.append(pred_choice if pred_choice else "None")
         
         results.append({
@@ -236,14 +237,17 @@ def main():
     print(f"\nTotal Accuracy: {accuracy:.4f}")
     
     # Confusion Matrix
-    labels = ["(A)", "(B)"]
-    cm = confusion_matrix(true_labels, pred_labels, labels=labels)
+    unique_labels = sorted(list(set([l for l in true_labels if l] + [l for l in pred_labels if l and l != "None"])))
+    if not unique_labels:
+        unique_labels = ["(A)", "(B)"]
+
+    cm = confusion_matrix(true_labels, pred_labels, labels=unique_labels)
     
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', xticklabels=labels, yticklabels=labels, cmap='Blues')
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=unique_labels, yticklabels=unique_labels, cmap='Blues')
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title(f'BLINK Spatial Relation Confusion Matrix\nAcc: {accuracy:.4f}')
+    plt.title(f'CVBench Counting Confusion Matrix\nAcc: {accuracy:.4f}')
     plt.savefig(os.path.join(args.output_dir, "confusion_matrix.png"))
     
     # Save raw results
