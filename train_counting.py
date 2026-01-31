@@ -252,7 +252,8 @@ class ValidationCallback(TrainerCallback):
         with open(os.path.join(args.output_dir, "optimized_param_names.txt"), "w") as f:
             for name in optimized_param_names:
                 f.write(f"{name}\n")
-        wandb.config.update({"optimized_param_names": optimized_param_names})    
+        if wandb.run is not None:
+            wandb.config.update({"optimized_param_names": optimized_param_names})    
         
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
@@ -316,7 +317,7 @@ class ValidationCallback(TrainerCallback):
                 
                 label = item.get('label', '<object>')
 
-                question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
+                question_prompt = f"{question}? Response Example : There are **<number>** {label} in the image."
                 
                 conversation = [
                     {
@@ -402,10 +403,29 @@ def main():
 
     os.environ["WANDB_PROJECT"] = "janus-counting-finetune"
     
-    if not os.path.exists(args.data_path):
-        raise FileNotFoundError(f"Dataset not found at {args.data_path}. Please run prepare_dataset.py first!")
+    # if not os.path.exists(args.data_path):
+    #     raise FileNotFoundError(f"Dataset not found at {args.data_path}. Please run prepare_dataset.py first!")
     
-    raw_dataset = load_from_disk(args.data_path)
+    from datasets import load_dataset, load_from_disk, concatenate_datasets
+    if os.path.exists(args.data_path):
+        print(f"Loading dataset from {args.data_path}...")
+        raw_dataset = load_from_disk(args.data_path)
+    # elif args.data_path == "COMBINED_POINTS_COUNTS":
+    #     data1_path = '/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-count-filtered-imgContained/train'
+    #     data2_path = '/home/work/.project/jiwon/deepseek-janus-pro-lora/data/pixmo-points-filtered_0-20_imgContained/train' 
+
+    #     target_columns = ['image_url', 'question', 'answer', 'count', 'label']
+
+    #     dataset1 = load_from_disk(data1_path)
+    #     dataset2 = load_from_disk(data2_path)
+
+    #     dataset1 = dataset1.remove_columns([col for col in dataset1.column_names if col not in target_columns])
+    #     dataset2 = dataset2.remove_columns([col for col in dataset2.column_names if col not in target_columns])
+
+    #     raw_dataset = concatenate_datasets([dataset1, dataset2])
+    else:
+        raise FileNotFoundError(f"Dataset path {args.data_path} does not exist.")
+        
     train_dataset = StreamingDatasetWrapper(raw_dataset)
     
     print(f"Loading model from {args.model_path}...")
@@ -479,7 +499,7 @@ def main():
         bf16=(torch_dtype == torch.bfloat16),
         fp16=(torch_dtype == torch.float16),
         logging_steps=1,
-        save_strategy="epoch",
+        save_strategy="no",
         eval_strategy="no",
         report_to="wandb",
         remove_unused_columns=False,

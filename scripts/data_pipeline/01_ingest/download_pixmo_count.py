@@ -42,7 +42,7 @@ def download_image(example):
         return {"image": None, "question": None, "answer": None, "valid": False}
 
 def process_dataset():
-    from datasets import load_from_disk, load_dataset
+    from datasets import load_from_disk, load_dataset, ClassLabel, Value
     for split in ['validation', 'test' , 'train']:
         output_path = f"data/pixmo-count-filtered-imgContained/{split}"
         if os.path.exists(output_path):

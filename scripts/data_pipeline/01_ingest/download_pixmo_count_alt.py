@@ -64,8 +64,8 @@ def process_item(item):
     # 데이터셋에는 label / count column이 존재해. label을 <object>로 간주하자.
     # question = "How many <object> are there in the image? Response Example : There are **<number>** of <object> in the image."
     # Answer = "There are **<number>** of <object> in the image."
-    question = f"How many {label} are there in the image? Response Example : There are **<number>** of {label} in the image."
-    answer = f"There are **{count}** of {label} in the image."
+    question = f"How many {label} are there in the image? Response Example : There are **<number>** {label} in the image."
+    answer = f"There are **{count}** {label} in the image."
     
     return {
         "image": image,
