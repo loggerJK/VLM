@@ -416,8 +416,14 @@ class Solver(FinetuneSolverBase):
     
     def _get_fsdp_wrap_policy(self, model):
         if self.args.use_lora:
-            from peft.utils.other import fsdp_auto_wrap_policy
-            return fsdp_auto_wrap_policy(model)
+            # peft's fsdp_auto_wrap_policy fails to find transformer layer classes
+            # through PeftModel wrapper. Use lambda_auto_wrap_policy instead.
+            # This works because use_orig_params=True allows mixed requires_grad in one FSDP unit.
+            base_model = model.base_model.model  # PeftModel -> LoraModel -> original model
+            return functools.partial(
+                lambda_auto_wrap_policy,
+                lambda_fn=lambda m: m in base_model.get_fsdp_wrap_module_list(),
+            )
         else:
             return functools.partial(
                 lambda_auto_wrap_policy,
@@ -542,17 +548,10 @@ class Solver(FinetuneSolverBase):
 
         # 2. Handle Trainable Parameters (Freezing Logic)
         if self.args.use_lora:
-            # LoRA handles freezing internally in _model_func (get_peft_model), so we just log.
-            # Ensure we don't accidentally unfreeze everything.
-            from xllmx.util.tensor_type import promote_param_to_fp32
-            
-            # Explicitly ensure only LoRA params are trainable (double check)
-            # and promote trainable params to fp32 if needed (though BF16 training usually keeps them BF16)
-            # Actually, standard practice for LoRA is mixed precision. 
-            # If args.precision is bf16, we usually keep LoRA in bf16 or fp32.
-            
-            # print_param_status will be called later to verify.
-            pass 
+            # LoRA adapters are initialized in float32 by default, but FSDP requires
+            # uniform dtype within each wrap unit. Cast entire model to the mixed
+            # precision dtype so base params (bf16) and LoRA params (fp32) are unified.
+            unwrapped_model = unwrapped_model.to(self.mixed_precision_dtype)
         else:
             # Original Logic for Full Finetune
             from xllmx.util.tensor_type import promote_param_to_fp32
@@ -939,11 +938,14 @@ class Solver(FinetuneSolverBase):
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
 
         # Split by 'descriptions' field: items with descriptions go to gen, without go to und
-        train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
-        train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
+        # train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
+        # train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
 
-        if len(train_gen_ds) == 0:
-            train_gen_ds = None
+        # if len(train_gen_ds) == 0:
+        #     train_gen_ds = None
+        
+        train_gen_ds = None
+        train_und_ds = train_ds
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='ocr', mode=self.args.mode)
 
@@ -1442,6 +1444,7 @@ class Solver(FinetuneSolverBase):
         if self.args.mode in ['und', 'both']:
             if self.args.task == 'ocr':
                 self.validate_ocr(self.start_epoch)
+                pass
             else:
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
