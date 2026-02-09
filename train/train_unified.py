@@ -414,6 +414,16 @@ class Solver(FinetuneSolverBase):
         
         return parser
     
+    def _get_fsdp_wrap_policy(self, model):
+        if self.args.use_lora:
+            from peft.utils.other import fsdp_auto_wrap_policy
+            return fsdp_auto_wrap_policy(model)
+        else:
+            return functools.partial(
+                lambda_auto_wrap_policy,
+                lambda_fn=lambda m: m in model.get_fsdp_wrap_module_list(),
+            )
+
     def setup_fsdp_sync(
         self, model: nn.Module, data_parallel: str, precision: str, grad_precision: str = None
     ) -> Union[FSDP, nn.Module]:                                                                             
@@ -431,17 +441,9 @@ class Solver(FinetuneSolverBase):
         # Set CPU Offload based on argument
         cpu_offload = CPUOffload(offload_params=self.args.cpu_offload)
 
-        # Handle LoRA wrapping policies if needed, but standard FSDP policy often works if layers are standard linear
-        # If LoRA is used, FSDP wraps the PeftModel
-        
         model = FSDP(
             model,
-            auto_wrap_policy=functools.partial(
-                lambda_auto_wrap_policy,
-                lambda_fn=lambda m: m in model.get_fsdp_wrap_module_list(),
-            ) if not self.args.use_lora else None, # Disable custom wrap policy for LoRA for now, let FSDP handle it or use default
-            # Note: For LoRA + FSDP, explicit wrapping is often better, but for now we try default or 'none' for debugging.
-            # If using 'none', this method returns early.
+            auto_wrap_policy=self._get_fsdp_wrap_policy(model),
             process_group=fs_init.get_data_parallel_group(),
             sharding_strategy={
                 "fsdp": ShardingStrategy.FULL_SHARD,
@@ -636,8 +638,13 @@ class Solver(FinetuneSolverBase):
             # Helper to check if module is in the list
             # For LoRA, the structure might change, so we might need a more robust check.
             # But get_checkpointing_wrap_module_list returns actual module objects, so it should work if they persist.
+            if checkpointing_list:
+                target_types = tuple(set(type(m) for m in checkpointing_list))
+            else:
+                target_types = ()
+
             def check_fn(submodule):
-                return submodule in checkpointing_list
+                return isinstance(submodule, target_types)
 
             apply_activation_checkpointing(
                 model,
@@ -1492,7 +1499,43 @@ class Solver(FinetuneSolverBase):
         # Check if FSDP or regular model
         is_fsdp = isinstance(self.model, FSDP)
         
-        if is_fsdp:
+        if is_fsdp and self.args.use_lora:
+            # FSDP + LoRA: gather full state dict, then save only LoRA adapter weights
+            save_name = f"epoch{epoch}"
+            if iteration is not None:
+                save_name += f"-iter{iteration}"
+            if global_step is not None:
+                save_name += f"-step{global_step}"
+            save_dir = os.path.join(self.args.output_dir, save_name)
+            os.makedirs(save_dir, exist_ok=True)
+
+            from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+            with FSDP.state_dict_type(
+                self.model, StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(rank0_only=True, offload_to_cpu=True),
+            ):
+                full_state_dict = self.model.state_dict()
+                if self.global_rank == 0:
+                    # Filter to LoRA keys only
+                    lora_state_dict = {
+                        k: v for k, v in full_state_dict.items()
+                        if "lora_" in k or "modules_to_save" in k
+                    }
+                    torch.save(lora_state_dict, os.path.join(save_dir, "adapter_model.bin"))
+                    # Save adapter config if available
+                    peft_model = self.model.module if hasattr(self.model, 'module') else self.model
+                    if hasattr(peft_model, 'peft_config'):
+                        for adapter_name, peft_cfg in peft_model.peft_config.items():
+                            peft_cfg.save_pretrained(save_dir)
+                            break
+                    self.tokenizer.save_pretrained(save_dir)
+                    with open(os.path.join(save_dir, "args.json"), "w") as f:
+                        json.dump(vars(self.args), f, indent=2)
+                    print(f"[Solver] Saved LoRA adapter (FSDP gathered) to {save_dir}")
+
+            util.ckpt.remove_early_ckpts(self.args.output_dir, max_keep=self.args.ckpt_max_keep)
+
+        elif is_fsdp:
             util.ckpt.save(
                 self.args.output_dir,
                 self.global_rank == 0,
