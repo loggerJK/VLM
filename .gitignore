@@ -2,3 +2,5 @@ __pycache__/
 output/
 wandb/
 evaluation_results/
+*.png
+*.sh

@@ -5,22 +5,25 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+from natsort import natsorted
+
+# BASE_DIR = '/mnt/data1/heeji/geneval'
+BASE_DIR = '/mnt/data1/dvlm/generation_eval'
+
+# List of input folders containing evaluation_results.jsonl
+input_folder_list = []
+print(f"Searching for folders containing 'evaluation_results.jsonl' in {BASE_DIR}...")
+for root, dirs, files in os.walk(BASE_DIR):
+    if 'evaluation_results.jsonl' in files:
+        input_folder_list.append(root)
+        print(f"Found: {root}")
+
+# Use natsorted for natural sorting
+# input_folder_list.sort()
+input_folder_list = natsorted(input_folder_list)
 
 
-input_folder_list = [
-    '/mnt/data1/heeji/geneval/results/lumina_base_eval',
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting",
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting_wohead",
-    "/mnt/data1/heeji/geneval/lumina_base_512",
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting_res512",
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_res512",
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_epoch6-iter45311-step12000",
-    "/mnt/data1/heeji/geneval/lumina_lora128_counting_wohead_epoch8-iter41215-step15400",
-       
-]
-
-
-overall_csv_path = '/mnt/data1/heeji/geneval/overall_summary_metrics.csv'
+overall_csv_path = '/mnt/data1/dvlm/generation_eval_overall_summary_metrics.csv'
 overall_csv_list = []
 
 for input_folder in input_folder_list:
@@ -75,12 +78,12 @@ for input_folder in input_folder_list:
     print(f"Mean Deviation: {mean_deviation:.4f}")
 
     # Confusion Matrix
-    labels = sorted(list(set(y_true + y_pred)))
+    labels = natsorted(list(set(y_true + y_pred)))
     # Filter labels to meaningful range (e.g. 2-10 as per previous examples, or just strict min/max)
     # Based on previous code, 2-10 seems standard for this benchmark
     labels = [l for l in labels if 2 <= l <= 10]
     if not labels:
-        labels = sorted(list(set(y_true + y_pred))) # Fallback if filtering removes everything
+        labels = natsorted(list(set(y_true + y_pred))) # Fallback if filtering removes everything
 
     # Confusion Matrix (Absolute)
     cm_abs = confusion_matrix(y_true, y_pred, labels=labels)

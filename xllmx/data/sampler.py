@@ -51,8 +51,8 @@ class FinetuneDistSampler(Sampler):
     def __init__(
         self,
         dataset: FinetuneConversationDataset,
-        num_replicas: Optional[int] = None,
-        rank: Optional[int] = None,
+        num_replicas: Optional[int] = None, # World size
+        rank: Optional[int] = None, # Rank 
         shuffle: bool = True,
         seed: int = 0,
         batch_size=None,
@@ -99,7 +99,7 @@ class FinetuneDistSampler(Sampler):
 
         group_len = {key: val // global_bsz_acc * global_bsz_acc for key, val in group_len.items()}
 
-        self.total_size = sum(list(group_len.values()))
+        self.total_size = sum(list(group_len.values())) # 매 epoch마다 샘플링되는 전체 샘플 수
         assert self.total_size % num_replicas == 0
         self.num_samples = self.total_size // num_replicas
 

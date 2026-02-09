@@ -1,8 +1,8 @@
+import os
 import torch
 from PIL import Image
 from diffusers import VQModel
 from diffusers.image_processor import VaeImageProcessor
-import os
 
 def test_vqvae_clean_api():
     # Setup
@@ -28,8 +28,16 @@ def test_vqvae_clean_api():
     
     image_processor = VaeImageProcessor(vae_scale_factor=scale_factor, do_normalize=False)
     
-    dtypes = [torch.float32, torch.float16, torch.bfloat16]
-    dtype_names = ["fp32", "fp16", "bf16"]
+    dtypes = [
+        torch.float32, 
+        # torch.float16, 
+        # torch.bfloat16
+    ]
+    dtype_names = [
+        "fp32", 
+        # "fp16", 
+        # "bf16"
+    ]
 
     for dtype, dtype_name in zip(dtypes, dtype_names):
         print(f"\n--- Testing {dtype_name} ---")
@@ -75,6 +83,8 @@ def test_vqvae_clean_api():
             print(f"Failed with {dtype_name}: {e}")
             import traceback
             traceback.print_exc()
+            
+    import pdb; pdb.set_trace()
 
 if __name__ == "__main__":
     test_vqvae_clean_api()

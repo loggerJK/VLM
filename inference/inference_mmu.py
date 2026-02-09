@@ -17,6 +17,8 @@ from model import LLaDAForMultiModalGeneration
 from utils.image_utils import preprocess_image, encode_img_with_breaks, calculate_vq_params, generate_crop_size_list, var_center_crop, add_break_line, encode_img_with_breaks_fixed
 from generators.text_understanding_generator import generate_text_understanding
 from utils.prompt_utils import generate_multimodal_understanding_prompt
+from utils.generation_utils import setup_seed
+setup_seed(42)
 
 
 def main():
@@ -55,7 +57,10 @@ def main():
     #     model = LLaDAForMultiModalGeneration(base_config)
     # else:
     model = LLaDAForMultiModalGeneration.from_pretrained(
-        args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto",
+        args.checkpoint, 
+        torch_dtype=torch.bfloat16, 
+        device_map="auto",
+        flash_attention=True,
     )
         
     model.to(device)
@@ -133,13 +138,14 @@ def main():
     elapsed_time = end_time - start_time
     print(f"[✓] (Time {elapsed_time:.2f}s)")
     
-    print(f"skip_special_tokens=False: {text_new}")
+    # print(f"skip_special_tokens=False: {text_new}")
     
     text_new = tokenizer.batch_decode(    out_new[:, code_start:-1],     skip_special_tokens=True)[0]
     
-    print(f"skip_special_tokens=True: {text_new}")
+    # print(f"skip_special_tokens=True: {text_new}")
+    print("\n=== Generated Text ===")
+    print(text_new)
     
-    import pdb; pdb.set_trace()
 
 
 if __name__ == '__main__':

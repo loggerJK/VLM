@@ -79,6 +79,8 @@ def generate_text_understanding(
 
             x0_p[:, code_start + (num_block + 1) * block_length:] = -np.inf
 
+            # Device Check
+            # print(f"x0.device: {x0.device}, x0_p.device: {x0_p.device}, x.device: {x.device}")
             x0 = torch.where(mask_index, x0, x)
             confidence = torch.where(mask_index, x0_p, -np.inf)
 

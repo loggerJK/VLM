@@ -30,7 +30,8 @@ def generate_image(
     use_cache=False,
     cache_ratio=0.9,
     refresh_interval=5,
-    warmup_ratio=0.3
+    warmup_ratio=0.3,
+    disable_tqdm=False,
 ) -> torch.LongTensor:
     """
     MaskGit parallel decoding to generate VQ tokens
@@ -89,7 +90,7 @@ def generate_image(
     vocab_offset = text_vocab_size
 
     # add tqdm progress bar for generation steps here
-    for step in tqdm(range(timesteps)):
+    for step in tqdm(range(timesteps), disable=disable_tqdm):
         if unknown_cnt.item() == 0:
             break
 

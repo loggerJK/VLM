@@ -120,6 +120,94 @@ def var_center_crop(pil_image, crop_size_list, random_top_k=1):
     return center_crop(pil_image, crop_size)
 
 
+def edge_pad(pil_image, target_size, pad_mode='edge'):
+    """
+    Resize image to fit inside target_size and pad with edge pixels
+
+    Args:
+        pil_image: Input PIL image
+        target_size: (width, height) tuple
+        pad_mode: 'edge' (replicate edge pixels) or 'mean' (mean edge color)
+
+    Returns:
+        Padded PIL image of exactly target_size
+    """
+    import numpy as np
+
+    # Aspect ratio를 유지하며 target_size 안에 fit되도록 resize
+    scale = min(target_size[0] / pil_image.size[0],
+                target_size[1] / pil_image.size[1])
+    new_size = (int(pil_image.size[0] * scale),
+                int(pil_image.size[1] * scale))
+    resized = pil_image.resize(new_size, resample=Image.BICUBIC)
+
+    if pad_mode == 'edge':
+        # NumPy의 edge replication 사용 (가장 가까운 edge pixel 반복)
+        img_array = np.array(resized)
+
+        # Padding 계산
+        pad_w = target_size[0] - new_size[0]
+        pad_h = target_size[1] - new_size[1]
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+
+        # Edge replication으로 padding
+        padded = np.pad(
+            img_array,
+            ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+            mode='edge'
+        )
+
+        return Image.fromarray(padded)
+
+    elif pad_mode == 'mean':
+        # 전체 edge의 평균 색상으로 padding
+        img_array = np.array(resized)
+        edge_pixels = np.concatenate([
+            img_array[0, :, :],   # top edge
+            img_array[-1, :, :],  # bottom edge
+            img_array[:, 0, :],   # left edge
+            img_array[:, -1, :]   # right edge
+        ], axis=0)
+        mean_color = tuple(edge_pixels.mean(axis=0).astype(int))
+
+        # 평균 색상으로 채운 후 center에 이미지 paste
+        padded = Image.new('RGB', target_size, mean_color)
+        paste_x = (target_size[0] - new_size[0]) // 2
+        paste_y = (target_size[1] - new_size[1]) // 2
+        padded.paste(resized, (paste_x, paste_y))
+
+        return padded
+
+    else:
+        raise ValueError(f"Unknown pad_mode: {pad_mode}")
+
+
+def var_edge_pad(pil_image, crop_size_list, random_top_k=1, pad_mode='edge'):
+    """
+    var_center_crop과 동일한 방식으로 target size를 선택하되,
+    crop 대신 edge padding 수행
+
+    Args:
+        pil_image: Input PIL image
+        crop_size_list: List of possible target sizes
+        random_top_k: Number of top candidates to randomly choose from
+        pad_mode: 'edge' (replicate edge pixels) or 'mean' (mean edge color)
+
+    Returns:
+        Edge-padded PIL image
+    """
+    w, h = pil_image.size
+    rem_percent = [min(cw / w, ch / h) / max(cw / w, ch / h) for cw, ch in crop_size_list]
+    target_size = random.choice(
+        sorted(((x, y) for x, y in zip(rem_percent, crop_size_list)), reverse=True)[:random_top_k]
+    )[1]
+
+    return edge_pad(pil_image, target_size, pad_mode=pad_mode)
+
+
 def generate_crop_size_list(num_patches, patch_size, max_ratio=4.0):
     assert max_ratio >= 1.0
     crop_size_list = []

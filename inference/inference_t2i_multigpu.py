@@ -8,6 +8,7 @@ import argparse
 import time
 import torch
 import random
+import torch.distributed as dist
 from transformers import AutoConfig, AutoTokenizer
 from PIL import Image
 import sys
@@ -54,6 +55,21 @@ def main():
     if args.prompt is None and args.prompt_files is None:
         parser.error("At least one of --prompt or --prompt_files must be provided.")
     
+    # DDP Setup
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if world_size > 1:
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        if rank == 0:
+            print(f"Initialized DDP with world_size={world_size}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Running in single process mode on {device}")
+
     # Special tokens
     MASK = SPECIAL_TOKENS["mask_token"]
     NEW_LINE = SPECIAL_TOKENS["newline_token"]
@@ -67,19 +83,24 @@ def main():
         setup_seed(args.seed)
     
     # Create Output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    if rank == 0:
+        os.makedirs(args.output_dir, exist_ok=True)
     
     # Load model and tokenizer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu' # Already set above
     tokenizer = AutoTokenizer.from_pretrained(args.vae_ckpt, trust_remote_code=True)
     model = LLaDAForMultiModalGeneration.from_pretrained(
-        args.checkpoint, torch_dtype=torch.bfloat16, device_map="auto",
-    )
+        args.checkpoint, torch_dtype=torch.bfloat16, device_map=None,
+    ).to(device)
     
     if args.lora_ckpt_path:
-        print(f"[INFO] Loading LoRA from {args.lora_ckpt_path}")
+        if rank == 0:
+            print(f"[INFO] Loading LoRA from {args.lora_ckpt_path}")
         model.load_adapter(args.lora_ckpt_path)
-        
+    
+    # Wait for all processes to load model
+    if world_size > 1:
+        dist.barrier()
     
     # Initial image parameters
     if args.painting_mode:
@@ -97,9 +118,10 @@ def main():
     # Calculate VQ parameters
     seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(height, width)
     
-    print(f"Generate image size: {height}x{width}")
-    print(f"Calculated VQ sequence length: {seq_len}")
-    print(f"Tokens per line (newline_every): {newline_every}")
+    if rank == 0:
+        print(f"Generate image size: {height}x{width}")
+        print(f"Calculated VQ sequence length: {seq_len}")
+        print(f"Tokens per line (newline_every): {newline_every}")
     
     # Get prompt templates
     templates = create_prompt_templates()
@@ -118,7 +140,8 @@ def main():
         })
     
     if args.prompt_files:
-        print(f"Reading prompts from {args.prompt_files}")
+        if rank == 0:
+            print(f"Reading prompts from {args.prompt_files}")
         with open(args.prompt_files, 'r') as f:
             for line in f:
                 if line.strip():
@@ -131,10 +154,12 @@ def main():
                                 "metadata": data
                             })
                     except json.JSONDecodeError:
-                        print(f"Skipping invalid JSON line: {line}")
+                        if rank == 0:
+                            print(f"Skipping invalid JSON line: {line}")
     
     if not prompt_data_list:
-        print("No prompts found.")
+        if rank == 0:
+            print("No prompts found.")
         return
 
     # build image mask predition (constant if painting mode is same or None)
@@ -144,15 +169,31 @@ def main():
         img_mask_token = add_break_line([MASK] * seq_len, token_grid_height, token_grid_width, new_number = NEW_LINE)
     img_pred_token = [BOA] + [BOI] + img_mask_token + [EOI] + [EOA]
 
-    print(f"Total prompts to process: {len(prompt_data_list)}")
+    # Split prompts among ranks
+    my_prompts = prompt_data_list[rank::world_size]
+    
+    if rank == 0:
+        print(f"Total prompts to process (across all ranks): {len(prompt_data_list)}")
+        print(f"Prompts for rank 0: {len(my_prompts)}")
 
     from tqdm import tqdm
-    for i, prompt_data in tqdm(enumerate(prompt_data_list), total=len(prompt_data_list), dynamic_ncols=True):
+    # Only show tqdm on rank 0 or if single process
+    disable_tqdm = (rank != 0)
+    
+    for i, prompt_data in tqdm(enumerate(my_prompts), total=len(my_prompts), dynamic_ncols=True, desc=f"Rank {rank} Processing Prompts"):
         prompt_text = prompt_data['prompt']
-        print(f"\nProcessing prompt [{i+1}/{len(prompt_data_list)}]: {prompt_text}")
+        
+        # Calculate original index for unique directory naming
+        # my_prompts[i] corresponds to prompt_data_list[rank + i * world_size]
+        real_idx = rank + i * world_size
+        
+        if not disable_tqdm:
+            # We use tqdm for progress, avoid print if using tqdm unless we use tqdm.write
+            # print(f"\nProcessing prompt [{real_idx+1}/{len(prompt_data_list)}]: {prompt_text}")
+            pass
         
         # Prepare structured output directory
-        prompt_dir = os.path.join(args.output_dir, f"{i:05d}")
+        prompt_dir = os.path.join(args.output_dir, f"{real_idx:05d}")
         samples_dir = os.path.join(prompt_dir, "samples")
         os.makedirs(samples_dir, exist_ok=True)
         
@@ -185,10 +226,22 @@ def main():
                 current_seed = random.randint(1, 2**32 - 1)
             
             setup_seed(current_seed)
-            print(f"  > Sample [{sample_idx+1}/{args.num_samples}] Seed: {current_seed}")
+            if rank == 0:
+                # print(f"  > Sample [{sample_idx+1}/{args.num_samples}] Seed: {current_seed}")
+                pass
+            
+            # Filename: 0000.png, 0001.png...
+            filename = f"{sample_idx:04d}.png"
+            save_path = os.path.join(samples_dir, filename)
+            if os.path.exists(save_path):
+                print(f"    [*] Sample image already exists, skipping: {save_path}")
+                # Add existing image to grid
+                existing_img = Image.open(save_path).convert("RGB")
+                generated_images.append(existing_img)
+                continue
             
             # Create a generator for reproducibility
-            generator = torch.Generator(device='cpu')
+            generator = torch.Generator(device=device)
             generator.manual_seed(current_seed)
 
             # Generate VQ tokens
@@ -207,12 +260,11 @@ def main():
                 cache_ratio=args.cache_ratio,
                 refresh_interval=args.refresh_interval,
                 warmup_ratio=args.warmup_ratio,
-                generator=generator
+                generator=generator,
+                disable_tqdm=True,
             )
             
-            # Filename: 0000.png, 0001.png...
-            filename = f"{sample_idx:04d}.png"
-            save_path = os.path.join(samples_dir, filename)
+
             
             # Decode VQ codes to PNG and save
             out_img = decode_vq_to_image(
@@ -239,12 +291,14 @@ def main():
                 out_img.save(save_path)
             
             generated_images.append(final_img)
-            print(f"    [✓] Saved {save_path}")
+            # if rank == 0:
+            #    print(f"    [✓] Saved {save_path}")
 
             end_time = time.time()
             elapsed_time = end_time - start_time
             
-            print(f"    Time for this sample: {elapsed_time:.2f}s")
+            # if rank == 0:
+            #    print(f"    Time for this sample: {elapsed_time:.2f}s")
             
         # Create horizontal grid
         if generated_images:
@@ -258,10 +312,14 @@ def main():
                 
                 grid_path = os.path.join(prompt_dir, "grid.png")
                 grid_img.save(grid_path)
-                print(f"    [✓] Saved grid: {grid_path}")
+                # if rank == 0:
+                #    print(f"    [✓] Saved grid: {grid_path}")
             except Exception as e:
                 print(f"    [!] Failed to save grid: {e}")
        
+    if world_size > 1:
+        dist.destroy_process_group()
+
 
 if __name__ == '__main__':
     main()

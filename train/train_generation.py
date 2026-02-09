@@ -481,6 +481,7 @@ class Solver(FinetuneSolverBase):
         if self.global_rank == 0:
             print(f"[Solver] Setting up validation prompts from {self.args.dataset_name}...")
         
+        # Load validation dataset
         try:
             # Try loading validation split
             val_ds = load_dataset(self.args.dataset_name, split="validation")
