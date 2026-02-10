@@ -411,7 +411,9 @@ class Solver(FinetuneSolverBase):
         # Dataset arguments
         parser.add_argument("--count_upper_limit", type=int, default=None, help="Upper limit for count. 20 means count<=20.")
         parser.add_argument("--count_lower_limit", type=int, default=None, help="Lower limit for count. 0 means count>=0.")
-        
+        parser.add_argument("--eval_everything", action="store_true",
+                            help="Run both understanding and generation validation regardless of --mode")
+
         return parser
     
     def _get_fsdp_wrap_policy(self, model):
@@ -788,36 +790,36 @@ class Solver(FinetuneSolverBase):
     
     def _setup_validation_prompts(self):
         # All ranks should run this to have consistent prompts for FSDP generation
-        if self.global_rank == 0:
-            print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
-        
-        # Try loading validation split
-        val_ds = load_dataset('heez/pixmo-point-count-gen-und', split="val_gen")
+        if self.args.task == 'ocr':
+            if self.global_rank == 0:
+                print(f"[Solver] Setting up validation prompts from OCR dataset...")
 
-        # Sample 10 random indices with fixed seed for consistency
-        rng = random.Random(42) 
-        indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
-        
-        self.validation_prompts = []
-        # text_keys = ['descriptions', 'text', 'caption', 'prompt']
-        
-        for idx in indices:
-            item = val_ds[idx]
-            # caption = ""
-            # for k in text_keys:
-            #     if k in item:
-            #         val = item[k]
-            #         if isinstance(val, list):
-            #              caption = val[0]
-            #         else:
-            #              caption = val
-            #         break
-            # if not caption:
-            #     caption = "Generate an image."
-            caption = item.get('descriptions', "Generate an image.")
-            if isinstance(caption, list):
-                caption = caption[0]
-            self.validation_prompts.append(caption)
+            val_ds = self.val_ds
+            rng = random.Random(42)
+            indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
+
+            self.validation_prompts = []
+            for idx in indices:
+                item = val_ds[idx]
+                answer = item.get('answer', '')
+                caption = f"An image containing the text: {answer}" if answer else "Generate an image."
+                self.validation_prompts.append(caption)
+        else:
+            if self.global_rank == 0:
+                print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
+
+            val_ds = load_dataset('heez/pixmo-point-count-gen-und', split="val_gen")
+
+            rng = random.Random(42)
+            indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
+
+            self.validation_prompts = []
+            for idx in indices:
+                item = val_ds[idx]
+                caption = item.get('descriptions', "Generate an image.")
+                if isinstance(caption, list):
+                    caption = caption[0]
+                self.validation_prompts.append(caption)
             
         # print(f"self.validation_prompts: {self.validation_prompts}")
         
@@ -843,81 +845,106 @@ class Solver(FinetuneSolverBase):
 
     @torch.no_grad()
     def log_validation_images(self, step):
-        # All ranks must participate because model(infer=True) inside generate_image 
-        # uses collective communication (FSDP).
-        
+        # All ranks must participate because model(infer=True) inside generate_image
+        # uses collective communication (FSDP AllGather).
+        # Prompts are distributed round-robin across ranks for parallel generation.
+
         if not hasattr(self, 'validation_prompts'):
-             self._setup_validation_prompts()
-             # Distribute prompts to all ranks so they all know what to generate
-             # (Simplified: since we used fixed seed in _setup_validation_prompts, all ranks should have same prompts if they all called it)
-        
-        # Ensure all ranks call _setup_validation_prompts if they don't have it
-        # Actually, in _setup_validation_prompts I had 'if self.global_rank != 0: return'. 
-        # I should change that so all ranks have the same fixed prompts.
+            self._setup_validation_prompts()
+
+        from utils.generation_utils import setup_seed
+
         templates = create_prompt_templates()
         print(f"[Rank {self.global_rank}] [Validation] Generating images at step {step}...")
         self.model.eval()
-        
+
+        # Seed 고정: validation마다 동일한 이미지 생성
+        setup_seed(42)
+
         prompts = self.validation_prompts
-        
-        images = []
-        for i, prompt in enumerate(prompts):
+        world_size = dist.get_world_size()
+
+        # Multi-GPU 프롬프트 분산 (round-robin)
+        my_indices = list(range(self.global_rank, len(prompts), world_size))
+        max_per_rank = math.ceil(len(prompts) / world_size)
+
+        local_results = []  # list of (prompt_idx, prompt_text, image_bytes)
+
+        for iter_idx in range(max_per_rank):
+            is_real = iter_idx < len(my_indices)
+            i = my_indices[iter_idx] if is_real else 0  # dummy uses prompt 0
+            prompt = prompts[i]
             sample_start_time = time.time()
-            # system_prompt = "Generate an image according to the text prompt."       # template
-            # instruction = f"<system>{system_prompt}</system><user>{prompt}</user>"
-            
+
             input_prompt, uncon_prompt = generate_text_to_image_prompt(prompt, templates)
 
-            # build initial sequence
             con_prompt_token = self.tokenizer(input_prompt)["input_ids"]
             uncon_prompt_token = self.tokenizer(uncon_prompt)["input_ids"]
 
-            img_mask_token = add_break_line([MASK] * self.validation_params["seq_len"], self.validation_params["token_grid_height"], self.validation_params["token_grid_width"], new_number = NEW_LINE)
+            img_mask_token = add_break_line(
+                [MASK] * self.validation_params["seq_len"],
+                self.validation_params["token_grid_height"],
+                self.validation_params["token_grid_width"],
+                new_number=NEW_LINE,
+            )
             img_pred_token = [BOA] + [BOI] + img_mask_token + [EOI] + [EOA]
 
             prompt_ids = torch.tensor(con_prompt_token + img_pred_token, device="cuda").unsqueeze(0)
             uncon_ids = torch.tensor(uncon_prompt_token, device="cuda").unsqueeze(0)
 
             code_start = len(con_prompt_token) + 2  # +2 for BOA and BOI
+
             try:
-                
                 out_tokens = generate_image(
                     self.model,
                     prompt_ids,
                     seq_len=self.validation_params["seq_len"],
                     newline_every=self.validation_params["newline_every"],
                     timesteps=64,
-                    temperature=1.0,        
+                    temperature=1.0,
                     cfg_scale=4.0,
                     uncon_ids=uncon_ids,
                     code_start=code_start,
                     refresh_interval=5,
-                    warmup_ratio=0.3, 
+                    warmup_ratio=0.3,
                 )
 
-                # Only rank 0 decodes and prepares WandB image
-                if self.global_rank == 0:
+                # Dummy iterations only exist for FSDP synchronization; discard results
+                if is_real:
                     img = decode_vq_to_image(
-                        out_tokens, 
-                        save_path=None, 
-                        vae_ckpt=None, 
-                        image_height=self.args.gen_image_size, 
-                        image_width=self.args.gen_image_size, 
-                        vqvae=self.vqvae
+                        out_tokens,
+                        save_path=None,
+                        vae_ckpt=None,
+                        image_height=self.args.gen_image_size,
+                        image_width=self.args.gen_image_size,
+                        vqvae=self.vqvae,
                     )
-                    images.append(wandb.Image(img, caption=prompt))
-                    
-                    sample_elapsed_time = time.time() - sample_start_time
-                    print(f"[Rank 0] [Validation] Finished prompt {i+1}/{len(prompts)} (Time: {sample_elapsed_time:.2f}s)")
-                
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    local_results.append((i, prompt, buf.getvalue()))
+
+                    elapsed = time.time() - sample_start_time
+                    print(f"[Rank {self.global_rank}] [Validation] Finished prompt {i+1}/{len(prompts)} (Time: {elapsed:.2f}s)")
+
             except Exception as e:
                 print(f"[Rank {self.global_rank}] [Validation] Error generating image for prompt '{prompt}': {e}")
-        
-        if self.global_rank == 0 and self.args.use_wandb and images:
+
+        # Gather results from all ranks
+        all_results = [None] * world_size
+        dist.all_gather_object(all_results, local_results)
+        gathered = [item for sublist in all_results for item in sublist]
+
+        # Rank 0: log to WandB
+        if self.global_rank == 0 and self.args.use_wandb and gathered:
+            gathered.sort(key=lambda x: x[0])  # sort by prompt index
+            images = []
+            for idx, caption, img_bytes in gathered:
+                img = Image.open(io.BytesIO(img_bytes))
+                images.append(wandb.Image(img, caption=caption))
             wandb.log({"val/generated_images": images})
-            
+
         self.model.train()
-        dist.barrier() # Sync after validation
+        dist.barrier()
         
     def _dataset_func(self):
         if self.args.task == 'ocr':
@@ -945,15 +972,20 @@ class Solver(FinetuneSolverBase):
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
 
-        # Split by 'descriptions' field: items with descriptions go to gen, without go to und
-        # train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
-        # train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
-
-        # if len(train_gen_ds) == 0:
-        #     train_gen_ds = None
-        
-        train_gen_ds = None
+        # gen 데이터셋: answer를 descriptions로 매핑하여 생성
+        train_gen_ds = train_ds.map(
+            lambda answer: {'descriptions': f"An image containing the text: {answer}"},
+            input_columns=['answer'], num_proc=64
+        )
         train_und_ds = train_ds
+
+        # gen 데이터에 answer가 비어있는 경우 필터링
+        train_gen_ds = train_gen_ds.filter(
+            lambda descriptions: descriptions is not None and descriptions != '',
+            num_proc=64, input_columns=['descriptions']
+        )
+        if len(train_gen_ds) == 0:
+            train_gen_ds = None
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='ocr', mode=self.args.mode)
 
@@ -1449,9 +1481,13 @@ class Solver(FinetuneSolverBase):
         print(f"[Solver] Starting from Global Step: {self.global_step}")
 
         # Initial Validation
-        if self.args.mode in ['und', 'both']:
+        run_und = self.args.eval_everything or self.args.mode in ['und', 'both']
+        run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
+
+        if run_und:
             if self.args.task == 'ocr':
                 self.validate_ocr(self.start_epoch)
+                pass
             else:
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
@@ -1459,7 +1495,7 @@ class Solver(FinetuneSolverBase):
                     self.validate(self.start_epoch, format="pointing", split="train")
                     self.validate(self.start_epoch, format="pointing", split="val")
 
-        if self.args.mode in ['gen', 'both']:
+        if run_gen:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
             self.log_validation_images(self.global_step)
@@ -1669,7 +1705,17 @@ class Solver(FinetuneSolverBase):
                         # 10% uncond
                         input_prompt = uncond_prompt
                     
-                    instruction_token = self.tokenizer(input_prompt, truncation=True, max_length=512, padding=False, return_tensors="pt").input_ids[0].tolist()
+                    instruction_token = self.tokenizer(input_prompt, truncation=True, max_length=1024, padding=False, return_tensors="pt").input_ids[0].tolist()
+
+                    # 이미지 토큰 보장: instruction을 줄여서 max_seq_len에 이미지가 온전히 들어가도록
+                    image_fixed_len = len(masked_image_tokens) + 4  # BOA, BOI, EOI, EOA
+                    max_instruction_len = self.args.max_seq_len - image_fixed_len
+                    if len(instruction_token) > max_instruction_len:
+                        # </user> 토큰 보존: 끝에서 분리 → 앞부분만 truncate → 재결합
+                        end_user_tokens = self.tokenizer("</user>", add_special_tokens=False).input_ids
+                        n_end = len(end_user_tokens)
+                        instruction_token = instruction_token[:max_instruction_len - n_end] + instruction_token[-n_end:]
+
                     instruction_label = [-100] * len(instruction_token)
 
                     final_input = instruction_token + [BOA] + [BOI] + masked_image_tokens + [EOI] + [EOA]                
@@ -1713,10 +1759,6 @@ class Solver(FinetuneSolverBase):
                     final_input = instruction_token + [BOA] + answer_token
                     final_label = instruction_label + [-100] + answer_label
 
-                if is_generation and len(final_input) > self.args.max_seq_len:
-                    final_input = final_input[:self.args.max_seq_len]
-                    final_label = final_label[:self.args.max_seq_len]
-                    
                 # task_type = "Gen" if is_generation else "Und"
                 # if self.global_rank == 0 :
                 #     print(f"[{task_type}]: instruction len: {len(instruction_token)}, answer len: {len(answer_token) if not is_generation else 'N/A'}, masked image len: {len(image_tokens_raw) if is_generation else 'N/A'}, final input len: {len(final_input)}")
@@ -1779,7 +1821,10 @@ class Solver(FinetuneSolverBase):
                 
                 # --- Step-based Validation ---
                 if self.global_step % self.args.validation_interval == 0:
-                    if self.args.mode in ['und', 'both']:
+                    run_und = self.args.eval_everything or self.args.mode in ['und', 'both']
+                    run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
+
+                    if run_und:
                         if self.args.task == 'ocr':
                             self.validate_ocr(epoch)
                         else:
@@ -1789,7 +1834,7 @@ class Solver(FinetuneSolverBase):
                                 self.validate(epoch, format="pointing", split="train")
                                 self.validate(epoch, format="pointing", split="val")
 
-                    if self.args.mode in ['gen', 'both'] and self.args.use_wandb:
+                    if run_gen and self.args.use_wandb:
                         if self.global_rank == 0:
                             print("[Solver] Logging validation images on wandb...")
                         self.log_validation_images(self.global_step)
