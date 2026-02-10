@@ -416,14 +416,22 @@ class Solver(FinetuneSolverBase):
     
     def _get_fsdp_wrap_policy(self, model):
         if self.args.use_lora:
-            # peft's fsdp_auto_wrap_policy fails to find transformer layer classes
-            # through PeftModel wrapper. Use lambda_auto_wrap_policy instead.
-            # This works because use_orig_params=True allows mixed requires_grad in one FSDP unit.
-            base_model = model.base_model.model  # PeftModel -> LoraModel -> original model
-            return functools.partial(
-                lambda_auto_wrap_policy,
-                lambda_fn=lambda m: m in base_model.get_fsdp_wrap_module_list(),
-            )
+            # peft's fsdp_auto_wrap_policy creates an OR policy:
+            # 1) lambda_policy: wraps trainable leaf modules (lora_A, lora_B) as separate FSDP units
+            # 2) transformer_policy: wraps transformer blocks as FSDP units
+            # This separates frozen base params from trainable LoRA params,
+            # eliminating wasted gradient buffer allocation and reduce-scatter communication.
+            #
+            # Dynamically resolve block class names from the actual model instance,
+            # since only one block type (e.g. LLaDALlamaBlock) is instantiated
+            # depending on config.block_type.
+            # Dynamic resolution (use if block_type changes):
+            # base_model = model.base_model.model
+            # block_modules = base_model.get_checkpointing_wrap_module_list()
+            # cls_names = ",".join({type(m).__name__ for m in block_modules})
+            os.environ["FSDP_TRANSFORMER_CLS_TO_WRAP"] = "LLaDALlamaBlock"
+            from peft.utils.other import fsdp_auto_wrap_policy
+            return fsdp_auto_wrap_policy(model)
         else:
             return functools.partial(
                 lambda_auto_wrap_policy,
@@ -1444,7 +1452,6 @@ class Solver(FinetuneSolverBase):
         if self.args.mode in ['und', 'both']:
             if self.args.task == 'ocr':
                 self.validate_ocr(self.start_epoch)
-                pass
             else:
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
