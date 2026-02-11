@@ -56,23 +56,42 @@ torchrun --nproc_per_node=<N> inference/inference_t2i_ddp.py ...
 python inference/inference_mmu.py ...
 ```
 
-### Evaluation
+### Evaluation (`evaluation_scripts/`)
+
+All evaluation scripts are in `evaluation_scripts/`, organized by task.
 
 ```bash
-# PixMo counting (multi-GPU)
-torchrun --nproc_per_node=<N> evaluate_pixmo_multigpu.py \
+# Understanding - Spatial (single GPU)
+python evaluation_scripts/2d_spatial/evaluate_blink_spatial.py \
     --checkpoint Alpha-VLLM/Lumina-DiMOO --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --lora_ckpt_path <lora_checkpoint_dir> --output_dir <output> \
+    --lora_ckpt_path <lora_dir> --output_dir <output> \
     --steps 20 --gen_length 20 --block_length 20
+python evaluation_scripts/2d_spatial/evaluate_cvbench_spatial.py ...
 
-# CVBench spatial / counting
-python evaluate_cvbench_spatial.py ...
-python evaluate_cvbench_counting.py ...
+# Understanding - Counting (multi-GPU)
+torchrun --nproc_per_node=<N> evaluation_scripts/counting/evaluate_pixmo_multigpu.py \
+    --checkpoint Alpha-VLLM/Lumina-DiMOO --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+    --lora_ckpt_path <lora_dir> --output_dir <output> \
+    --steps 20 --gen_length 20 --block_length 20
+torchrun --nproc_per_node=<N> evaluation_scripts/counting/evaluate_cvbench_counting_multigpu.py ...
 
-# GenEval benchmark
-bash 01_geneval_inference.sh
-bash 02_geneval_eval_specific_model.sh
+# Generation - GenEval (3-stage pipeline)
+bash evaluation_scripts/counting/01_geneval_inference_multigpu.sh  # 1) generate images
+bash evaluation_scripts/counting/02_geneval_eval_specific_model.sh # 2) evaluate with external tool
+python evaluation_scripts/counting/03_summarize_jsonl_results_and_make_confusion_mat.py # 3) aggregate results
 ```
+
+**Evaluation benchmarks:**
+
+| Task | Script | Dataset | Metric | Multi-GPU |
+|------|--------|---------|--------|-----------|
+| BLINK Spatial | `2d_spatial/evaluate_blink_spatial.py` | `BLINK-Benchmark/BLINK` | Accuracy (A/B) | X |
+| CVBench Spatial | `2d_spatial/evaluate_cvbench_spatial.py` | `nyu-visionx/CV-Bench` (Relation) | Accuracy | X |
+| CVBench Counting | `counting/evaluate_cvbench_counting.py` | `nyu-visionx/CV-Bench` (Counting) | Accuracy | O |
+| Pixmo Counting | `counting/evaluate_pixmo.py` | `Jiwon-Kang/pixmo-count-filtered-imgContained` | MAD | O |
+| GenEval | `counting/01→02→03` pipeline | Text prompts → generated images | Counting accuracy | O |
+
+**Common eval arguments:** `--checkpoint`, `--vae_ckpt`, `--output_dir`, `--steps`, `--gen_length`, `--block_length`, `--lora_ckpt_path`, `--seed`
 
 ### Resume Training
 
@@ -98,6 +117,7 @@ LLaDAForMultiModalGeneration (model/modeling_xllmx_dimoo.py)
 | `model/` | Model definitions (LLaDA transformer + multimodal wrapper) |
 | `train/` | Training scripts per task + `train_unified.py` for multi-task |
 | `inference/` | Inference scripts for T2I, I2I, MMU |
+| `evaluation_scripts/` | Evaluation scripts by task: `2d_spatial/`, `counting/`, `ocr/` |
 | `generators/` | Generation algorithms (MaskGit decoding, text understanding, I2I) |
 | `utils/` | Image encoding/decoding (VQ-VAE), generation utils (cosine schedule, Gumbel sampling), prompt templates |
 | `xllmx/` | Distributed training framework (solver, dataset, sampler, checkpointing, LR scheduling) |

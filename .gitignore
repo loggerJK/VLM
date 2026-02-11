@@ -3,4 +3,5 @@ output/
 wandb/
 evaluation_results/
 *.png
-*.sh
+# *.sh
+.env

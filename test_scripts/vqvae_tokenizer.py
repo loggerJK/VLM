@@ -18,15 +18,14 @@ def test_vqvae_clean_api():
     original_image = Image.open(image_path).convert("RGB").resize((512, 512))
     w, h = original_image.size
     
-    # Load Model (FP32)
-    vqvae = VQModel.from_pretrained(model_id, subfolder="vqvae", torch_dtype=torch.float32).to(device)
-    vqvae.eval()
+    # # Load Model (FP32)
+    # vqvae = VQModel.from_pretrained(model_id, subfolder="vqvae", torch_dtype=torch.float32).to(device)
+    # vqvae.eval()
     
-    scale_factor = 2 ** (len(vqvae.config.block_out_channels) - 1)
-    new_w, new_h = (w // scale_factor) * scale_factor, (h // scale_factor) * scale_factor
-    original_image = original_image.resize((new_w, new_h), Image.LANCZOS)
+    # scale_factor = 2 ** (len(vqvae.config.block_out_channels) - 1)
+    # new_w, new_h = (w // scale_factor) * scale_factor, (h // scale_factor) * scale_factor
+    # original_image = original_image.resize((new_w, new_h), Image.LANCZOS)
     
-    image_processor = VaeImageProcessor(vae_scale_factor=scale_factor, do_normalize=False)
     
     dtypes = [
         torch.float32, 
@@ -45,6 +44,12 @@ def test_vqvae_clean_api():
             # Reload model in target dtype
             vqvae = VQModel.from_pretrained(model_id, subfolder="vqvae", torch_dtype=dtype).to(device)
             vqvae.eval()
+            
+            scale_factor = 2 ** (len(vqvae.config.block_out_channels) - 1)
+            new_w, new_h = (w // scale_factor) * scale_factor, (h // scale_factor) * scale_factor
+            original_image = original_image.resize((new_w, new_h), Image.LANCZOS)
+            
+            image_processor = VaeImageProcessor(vae_scale_factor=scale_factor, do_normalize=False)
             
             x = image_processor.preprocess(original_image).to(device=device, dtype=dtype)
 

@@ -1,4 +1,4 @@
-name: base
+name: lumina-dimoo
 channels:
   - defaults
   - conda-forge
@@ -195,10 +195,10 @@ dependencies:
       - shellingham==1.5.4
       - sortedcontainers==2.4.0
       - sympy==1.13.1
-      - torch==2.5.1+cu124
-      - torchaudio==2.5.1+cu124
+      - torch==2.5.1
+      - torchaudio==2.5.1
       - torchelastic==0.2.2
-      - torchvision==0.20.1+cu124
+      - torchvision==0.20.1
       - triton==3.1.0
       - typer-slim==0.21.1
       - types-dataclasses==0.6.6
