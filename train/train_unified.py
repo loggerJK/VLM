@@ -1484,7 +1484,7 @@ class Solver(FinetuneSolverBase):
         run_und = self.args.eval_everything or self.args.mode in ['und', 'both']
         run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
 
-        if run_und:
+        if run_und and self.args.wandb_run_id is None:
             if self.args.task == 'ocr':
                 self.validate_ocr(self.start_epoch)
                 pass
@@ -1495,7 +1495,7 @@ class Solver(FinetuneSolverBase):
                     self.validate(self.start_epoch, format="pointing", split="train")
                     self.validate(self.start_epoch, format="pointing", split="val")
 
-        if run_gen:
+        if run_gen and self.args.wandb_run_id is None:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
             self.log_validation_images(self.global_step)

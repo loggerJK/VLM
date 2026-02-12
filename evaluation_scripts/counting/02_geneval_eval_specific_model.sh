@@ -2,7 +2,7 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 BASE_DIR="/mnt/data1/jiwon/geneval"
-EVAL_BASE_DIR="/mnt/data1/dvlm/generation_eval"
+EVAL_BASE_DIR="/mnt/data1/dvlm/counting/generation/geneval"
 # RESULTS_ROOT="/mnt/data1/heeji/geneval/results"
 
 # Move to a neutral directory to avoid local mmcv/mmdetection folders

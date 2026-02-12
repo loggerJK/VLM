@@ -53,10 +53,10 @@ for ckpt in "${ckpt_list[@]}"; do
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/understanding_eval/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/counting/understanding/pixmo/${output_dir_name} \
         --steps 20 \
         --gen_length 20 \
-        --block_length 20 
+        --block_length 20
 done
 
 base_dir="/mnt/data1"
@@ -128,7 +128,7 @@ for ckpt in "${ckpt_list[@]}"; do
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/understanding_eval/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/counting/understanding/pixmo/${output_dir_name} \
         --steps 20 \
         --gen_length 20 \
         --block_length 20 

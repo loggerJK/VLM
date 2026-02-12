@@ -1324,8 +1324,8 @@ class LLaDAModel(nn.Module):
                 # it can produce NaNs.
                 ensure_finite_(attention_bias, check_neg_inf=True, check_pos_inf=False)
             
-            if not torch.isfinite(attention_bias).all():
-                 print(f"[Model] attention_bias has non-finite values. min: {attention_bias.min().item()}", flush=True)
+            # if not torch.isfinite(attention_bias).all():
+            #      print(f"[Model] attention_bias has non-finite values. min: {attention_bias.min().item()}", flush=True)
 
         attn_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = [] if use_cache else None
 
@@ -1463,6 +1463,8 @@ class LLaDAModelLM(PreTrainedModel):
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
+            
+        self.post_init()
 
     def forward(
         self,
@@ -1558,7 +1560,7 @@ class LLaDAModelLM(PreTrainedModel):
         else:
             self.model.transformer.ff_out = value
 
-    def tie_weights(self):
+    def tie_weights(self, **kwargs):
         if self.config.weight_tying:
             self.model.transformer.ff_out = self.model.transformer.wte
 

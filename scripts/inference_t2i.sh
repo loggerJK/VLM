@@ -1,29 +1,29 @@
 
 export CUDA_VISIBLE_DEVICES=7
 
-PROMPT=$(cat <<'EOF'
-Generate an image of a clean academic document page.
+# PROMPT=$(cat <<'EOF'
+# Generate an image of a clean academic document page.
 
-IMPORTANT: The text content MUST be rendered EXACTLY as provided below,
-character-by-character, with no omissions, no paraphrasing, no rewording,
-no spelling changes, and no added or removed text.
+# IMPORTANT: The text content MUST be rendered EXACTLY as provided below,
+# character-by-character, with no omissions, no paraphrasing, no rewording,
+# no spelling changes, and no added or removed text.
 
-Render the following text verbatim:
+# Render the following text verbatim:
 
-"""
-Why Do We Need OCRBench v2?
+# """
+# Why Do We Need OCRBench v2?
 
-Limitations of Existing Benchmarks.
-Recent evaluations of LMMs’ OCR capabilities have made significant progress,
-yet most existing benchmarks exhibit limitations.
-"""
-EOF
-)
+# Limitations of Existing Benchmarks.
+# Recent evaluations of LMMs’ OCR capabilities have made significant progress,
+# yet most existing benchmarks exhibit limitations.
+# """
+# EOF
+# )
 
 
 python inference/inference_t2i_official.py\
     --checkpoint Alpha-VLLM/Lumina-DiMOO \
-    --prompt "$PROMPT" \
+    --prompt "a photo of beautiful scenery with mountains and a lake" \
     --height 1024 \
     --width 1024 \
     --timesteps 64 \

@@ -55,7 +55,7 @@ for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/generation_eval/lumina_${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 done
 
@@ -101,6 +101,6 @@ for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/generation_eval/lumina_${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 done

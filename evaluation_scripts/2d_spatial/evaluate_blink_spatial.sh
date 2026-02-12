@@ -1,5 +1,5 @@
 BASE_CKPT_DIR="/mnt/data1/heeji/dVLM_outputs_from_ext_srv/lora128_spatial_relation_wohead_und-20260126-144357"
-BASE_OUT_DIR="./evaluation_results/lora128_spatial_relation_wohead_und_question_modif/blink"
+BASE_OUT_DIR="/mnt/data1/dvlm/spatial/understanding/blink"
 
 for EPOCH in {0..9}; do
     CKPT_PATH="${BASE_CKPT_DIR}/epoch${EPOCH}"

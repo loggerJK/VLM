@@ -7,6 +7,7 @@ import json
 import argparse
 import time
 import torch
+torch.set_grad_enabled(False)
 from transformers import AutoConfig, AutoTokenizer
 from PIL import Image
 import sys
@@ -76,7 +77,7 @@ def main():
 
     # Load VQ-VAE
     from diffusers import VQModel
-    vqvae = VQModel.from_pretrained(args.vae_ckpt, subfolder="vqvae").to(device)
+    vqvae = VQModel.from_pretrained(args.vae_ckpt, subfolder="vqvae", torch_dtype=torch.bfloat16).to(device)
     # Calculate VQ parameters
     seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(height, width)
     

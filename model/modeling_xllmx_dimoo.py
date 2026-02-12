@@ -19,6 +19,8 @@ def create_attention_mask(original_lengths, max_tokens, device):
     return attention_mask
 
 class LLaDAForMultiModalGeneration(LLaDAModelLM):
+    _tied_weights_keys = {}
+    all_tied_weights_keys = _tied_weights_keys
     config_class = LLaDAConfig
     base_model_prefix = "model"
     def __init__(self, config: LLaDAConfig, *args, **kwargs):

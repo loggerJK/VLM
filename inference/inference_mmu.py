@@ -7,6 +7,7 @@ import json
 import argparse
 from PIL import Image
 import torch
+torch.set_grad_enabled(False)
 import time
 from transformers import AutoConfig, AutoTokenizer
 import sys
@@ -85,7 +86,7 @@ def main():
     
     # Preprocess image
     img = Image.open(image_path)
-    crop_size_list = generate_crop_size_list((1024 // 32) ** 2, 32)
+    crop_size_list = generate_crop_size_list((512 // 32) ** 2, 32)
     image = var_center_crop(img, crop_size_list=crop_size_list)
     image_width, image_height = image.size
     

@@ -44,6 +44,7 @@ class HawkQwenModel(HawkMetaModel, Qwen2Model):
 
 class HawkQwenForCausalLM(Qwen2ForCausalLM, HawkMetaForCausalLM):
     _tied_weights_keys = ["lm_head.weight"]
+    all_tied_weights_keys = _tied_weights_keys
     config_class = HawkQwenConfig
     _no_split_modules = ['Qwen2DecoderLayer']
     _supports_flash_attn_2 = True

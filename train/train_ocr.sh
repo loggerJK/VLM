@@ -30,6 +30,9 @@ exp_name="lora128_ocr_4_images_wohead"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
+export WANDB_RUN_ID="6timxt2a"
+# unset WANDB_RUN_ID
+
 # WandB 설정
 source .env
 
@@ -42,7 +45,7 @@ echo "Output Directory: $output_dir"
 /home/cvlab22/anaconda3/envs/lumina_dimoo/bin/python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
     --master_port=29506 \
-    train/train_ocr.py \
+    train/train_unified.py \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter ${accum_iter} \
     --epochs ${epochs} \
@@ -72,4 +75,8 @@ echo "Output Directory: $output_dir"
     --ckpt_max_keep ${ckpt_max_keep} \
     --wo_lm_head \
     --dataset_path "Jiwon-Kang/Llama-Nemotron-VLM-Dataset-v1-OCR4" \
+    --wandb_run_id $WANDB_RUN_ID \
+    --resume_path "/mnt/data1/jiwon/Lumina-DiMOO/output/lora128_ocr_4_images_wohead/epoch9-iter10079-step13500" \
+    --task 'ocr' \
+    --mode 'und' \
     2>&1 | tee "$output_dir/output.log"
