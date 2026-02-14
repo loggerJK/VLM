@@ -8,7 +8,7 @@
 source ./.env
 export CUDA_VISIBLE_DEVICES=3
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
-export WANDB_NAME="train[transformer_lora128]_dset[heez_pixmo_point_count]_ngpu${NUM_GPUS}_bs1_accum128_lr4e-5_ep3_full"
+export WANDB_NAME="train[transformer_lora128]_dset[heez_pixmo_point_count]"
 
 # [설정] 사전 학습된 Janus 모델 경로
 # 실제 모델 가중치(config.json, pytorch_model.bin 등)가 있는 디렉토리로 변경해주세요.
