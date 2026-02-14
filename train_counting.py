@@ -255,7 +255,8 @@ class ValidationCallback(TrainerCallback):
         with open(os.path.join(args.output_dir, "optimized_param_names.txt"), "w") as f:
             for name in optimized_param_names:
                 f.write(f"{name}\n")
-        wandb.config.update({"optimized_param_names": optimized_param_names})    
+        if wandb.run is not None:
+            wandb.config.update({"optimized_param_names": optimized_param_names})    
         
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
@@ -337,7 +338,7 @@ class ValidationCallback(TrainerCallback):
                 
                 label = item.get('label', '<object>')
 
-                question_prompt = f"{question}? Response Example : There are **<number>** of {label} in the image."
+                question_prompt = f"{question}? Response Example : There are **<number>** {label} in the image."
                 
                 conversation = [
                     {
