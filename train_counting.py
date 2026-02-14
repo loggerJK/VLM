@@ -189,6 +189,9 @@ def collate_fn(batch, processor, task="counting"):
         ]
         
         try:
+            # print("="*50)
+            # print(f"q_col: {q_col}, a_col: {a_col}")
+            # print(f"Processing sample with question: {item[q_col]} and answer: {item[a_col]}")
             prepare = processor(
                 conversations=conversation,
                 images=[image],
@@ -432,6 +435,18 @@ def main():
         raw_dataset = load_dataset(args.data_path, split="train")
     else :
         raw_dataset = load_from_disk(args.data_path)
+        
+        
+    if args.task == "counting":
+        print("[INFO] =========== Filtering dataset for counting task... ===========")
+        q_col, a_col = 'question_count', 'answer_count'
+        # Flitering out samples 
+        raw_dataset = raw_dataset.filter(
+            lambda q_col_val, a_col_val: q_col_val is not None and a_col_val is not None,
+            num_proc=64,
+            input_columns=[q_col, a_col],
+        )
+        
     train_dataset = StreamingDatasetWrapper(raw_dataset)
     
     print(f"Loading model from {args.model_path}...")

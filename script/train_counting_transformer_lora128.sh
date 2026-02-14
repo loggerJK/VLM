@@ -6,7 +6,7 @@
 
 # [설정] WandB API Key (.env 파일에서 로드)
 source ./.env
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 export WANDB_NAME="train[transformer_lora128]_dset[heez_pixmo_point_count]"
 
@@ -21,7 +21,7 @@ TUNING_MODE="transformer_lora"      # 'lora' 또는 'full'
 LORA_R=128                     # LoRA Rank (TUNING_MODE가 'lora'일 때만 사용)
 LORA_ALPHA=32                # LoRA Alpha (TUNING_MODE가 'lora'일 때만 사용)
 BATCH_SIZE=1         # Device당 배치 사이즈
-EPOCHS=100000000
+EPOCHS=100
 LR=4e-5
 GRAD_ACCUM_STEPS=$((128 / NUM_GPUS))     # Gradient Accumulation Steps, Total 128
 USE_GRAD_CHECKPOINT=0  # 1=True, 0=False (메모리 절약)
@@ -49,7 +49,7 @@ if [ "$NUM_GPUS" -gt 1 ]; then
     # 포트 충돌 방지를 위해 main_process_port를 랜덤하게 설정하는 것도 좋습니다.
     LAUNCH_CMD="accelerate launch --num_processes $NUM_GPUS --main_process_port 29500"
 else
-    LAUNCH_CMD="python"
+    LAUNCH_CMD="python -m pdb"
 fi
 
 echo "================================================================"
