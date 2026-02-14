@@ -13,7 +13,7 @@ from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
 from PIL import Image
 import numpy as np
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from tqdm import tqdm
 import wandb
 
@@ -166,9 +166,12 @@ class StreamingDatasetWrapper(torch.utils.data.IterableDataset):
             output_item['image'] = image
             yield output_item
 
-def collate_fn(batch, processor):
+def collate_fn(batch, processor, task="counting"):
     prepare_list = []
-    
+
+    q_col = 'question' if task == 'pointing' else 'question_count'
+    a_col = 'answer' if task == 'pointing' else 'answer_count'
+
     for item in batch:
         image = item.get('image')
         if image is None: continue
@@ -176,12 +179,12 @@ def collate_fn(batch, processor):
         conversation = [
             {
                 "role": "<|User|>",
-                "content": f"<image_placeholder>\n{item['question']}",
+                "content": f"<image_placeholder>\n{item[q_col]}",
                 "images": [image]
             },
             {
                 "role": "<|Assistant|>",
-                "content": item['answer']
+                "content": item[a_col]
             }
         ]
         
@@ -256,11 +259,11 @@ class ValidationCallback(TrainerCallback):
         
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
-        if state.global_step > 0 and state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
-            checkpoint_dir = os.path.join(self.args.output_dir, f"checkpoint-{state.global_step}")
+        if state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
+            checkpoint_dir = os.path.join(self.args.output_dir, f"epoch{int(state.epoch)}_step-{state.global_step}")
             os.makedirs(checkpoint_dir, exist_ok=True)
             
-            if self.args.tuning_mode == "lora":
+            if self.args.tuning_mode == "transformer_lora":
                 if self.trainer.is_world_process_zero:
                     print(f"\n[Step {state.global_step}] Saving checkpoint to {checkpoint_dir}")
                     peft_model = self.trainer.model.module.language_model if hasattr(self.trainer.model, 'module') else self.trainer.model.language_model
@@ -274,6 +277,24 @@ class ValidationCallback(TrainerCallback):
         if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
             self.validate(model, state)
 
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
+        if state.is_world_process_zero:
+            epoch = int(state.epoch)
+            checkpoint_dir = os.path.join(self.args.output_dir, f"epoch{epoch}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+            if self.args.tuning_mode == "transformer_lora":
+                print(f"\n[Epoch {epoch}] Saving LoRA checkpoint to {checkpoint_dir}")
+                peft_model = self.trainer.model.module.language_model if hasattr(self.trainer.model, 'module') else self.trainer.model.language_model
+                peft_model.save_pretrained(checkpoint_dir)
+                self.processor.save_pretrained(checkpoint_dir)
+            else:
+                print(f"\n[Epoch {epoch}] Saving checkpoint to {checkpoint_dir}")
+                self.trainer.save_model(checkpoint_dir)
+                self.processor.save_pretrained(checkpoint_dir)
+
+
+
     def validate(self, model, state):
         print(f"\n[Step {state.global_step}] Running Validation on CountBenchQA...")
         model.eval()
@@ -281,7 +302,7 @@ class ValidationCallback(TrainerCallback):
         total = 0
         eval_limit = 100 # len(self.eval_dataset)
         
-        val_dataset_stream = load_dataset("Jiwon-Kang/pixmo-count-filtered-imgContained", split="validation", streaming=True)
+        val_dataset_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=True)
         eval_dataset = iter(val_dataset_stream)  
         
         if hasattr(model, "module"):
@@ -398,14 +419,18 @@ def main():
     parser.add_argument("--num_workers", type=int, default=16, help="Number of dataloader workers")
     parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every n steps")
     parser.add_argument("--log_freq", type=int, default=500, help="Log validation every n steps")
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank (if tuning_mode is 'lora')")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (if tuning_mode is 'lora')")
+    parser.add_argument("--task", type=str, default="counting", choices=["pointing", "counting"],
+                        help="Task type: 'pointing' (question/answer) or 'counting' (question_count/answer_count)")
     args = parser.parse_args()
 
     os.environ["WANDB_PROJECT"] = "janus-counting-finetune"
     
     if not os.path.exists(args.data_path):
-        raise FileNotFoundError(f"Dataset not found at {args.data_path}. Please run prepare_dataset.py first!")
-    
-    raw_dataset = load_from_disk(args.data_path)
+        raw_dataset = load_dataset(args.data_path, split="train")
+    else :
+        raw_dataset = load_from_disk(args.data_path)
     train_dataset = StreamingDatasetWrapper(raw_dataset)
     
     print(f"Loading model from {args.model_path}...")
@@ -425,18 +450,38 @@ def main():
     )
     
     if args.tuning_mode == "transformer_lora":
-        print("[INFO] Transformer LoRA tuning...")
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["q_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.1,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM
-        )
-        # model = get_peft_model(model, lora_config)
-        model.language_model = get_peft_model(model.language_model, lora_config)
-        model.language_model.print_trainable_parameters()
+        if os.environ.get("WANDB_RUN_ID") is None:
+            print(f"[INFO] Transformer LoRA (tuning with r={args.lora_r}, alpha={args.lora_alpha})...")
+            for param in model.parameters():
+                param.requires_grad = False
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
+                lora_dropout=0.1,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM
+            )
+            # model = get_peft_model(model, lora_config)
+            model.language_model = get_peft_model(model.language_model, lora_config)
+            model.language_model.print_trainable_parameters()
+        else:
+            print(f"[INFO] Resuming Transformer LoRA (with r={args.lora_r}, alpha={args.lora_alpha}) from checkpoint...")
+            for param in model.parameters():
+                param.requires_grad = False
+            checkpoint_dir = os.getenv("RESUME_CHECKPOINT_PATH")
+            if checkpoint_dir is None:
+                raise ValueError("RESUME_CHECKPOINT_PATH environment variable must be set to resume from a checkpoint.")
+            model.language_model = PeftModel.from_pretrained(
+                model.language_model,
+                checkpoint_dir,
+                torch_dtype=torch_dtype,
+            )
+            for name, param in model.language_model.named_parameters():
+                if 'lora' in name:
+                    param.requires_grad = True
+            print(f"[INFO] Loaded LoRA adapter from checkpoint : {checkpoint_dir}.")
+            model.language_model.print_trainable_parameters()
     elif args.tuning_mode == "transformer":
         print("[INFO] Transformer fine-tuning...")
         for param in model.parameters():
@@ -479,7 +524,7 @@ def main():
         bf16=(torch_dtype == torch.bfloat16),
         fp16=(torch_dtype == torch.float16),
         logging_steps=1,
-        save_strategy="epoch",
+        save_strategy="no",
         eval_strategy="no",
         report_to="wandb",
         remove_unused_columns=False,
@@ -495,7 +540,7 @@ def main():
     )
     
     def data_collator(batch):
-        return collate_fn(batch, processor)
+        return collate_fn(batch, processor, task=args.task)
     
     val_callback = ValidationCallback(processor, None, args, log_freq=args.log_freq) 
 
@@ -508,14 +553,21 @@ def main():
     )
     val_callback.trainer = trainer
     
+    resume_kwargs = {
+        'wandb_resume': os.getenv("WANDB_RESUME", "never"),
+        'wandb_resume_id': os.getenv("WANDB_RESUME_ID"),
+        'resume_global_step': int(os.getenv("RESUME_GLOBAL_STEP", "0")),
+        'resume_epoch': int(os.getenv("RESUME_EPOCH", "0")),
+    }
+    
     print("Starting training...")
-    trainer.train()
+    trainer.train(**resume_kwargs)
     
     final_output_dir = os.path.join(args.output_dir, "final_model")
     os.makedirs(final_output_dir, exist_ok=True)
     print(f"Saving model to {final_output_dir}")
     
-    if args.tuning_mode == "lora":
+    if args.tuning_mode == "transformer_lora":
         # Save only the LoRA adapter
         model.language_model.save_pretrained(final_output_dir)
     else:

@@ -4,29 +4,31 @@
 # Janus-Pro-7B Counting Task Training Script
 # -----------------------------------------------------------------------------
 
-# [설정] WandB API Key (https://wandb.ai/authorize 에서 확인 가능)
-# 여기에 키를 입력하거나, 환경 변수로 설정해 주세요.
-export CUDA_VISIBLE_DEVICES=0
-export WANDB_NAME="train[transformer_ONLY]_dset[pixmo-count]_ngpu1_bs1_accum128_lr4e-5_ep3_full"
-NUM_GPUS=1
-WANDB_API_KEY="f9831e23517e27f7ecac9b54bc2cdcabb3af8c33" 
+# [설정] WandB API Key (.env 파일에서 로드)
+source ./.env
+export CUDA_VISIBLE_DEVICES=2
+export WANDB_NAME="train[transformer_ONLY]_dset[pixmo_point_count_concat]_ngpu1_bs1_accum128_lr4e-5_ep3_full"
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 
 # [설정] 사전 학습된 Janus 모델 경로
 # 실제 모델 가중치(config.json, pytorch_model.bin 등)가 있는 디렉토리로 변경해주세요.
 MODEL_PATH="deepseek-ai/Janus-Pro-7B"
-DATA_PATH="./data/pixmo-count-filtered-imgContained/train"
+DATA_PATH="heez/pixmo-point-count-gen-und"
 OUTPUT_DIR="./checkpoints/${WANDB_NAME}"
 
 # [설정] 학습 하이퍼파라미터
 TUNING_MODE="transformer_ONLY"      # 'lora' 또는 'full'
+LORA_R=128                     # LoRA Rank (TUNING_MODE가 'lora'일 때만 사용)
+LORA_ALPHA=32                # LoRA Alpha (TUNING_MODE가 'lora'일 때만 사용)
 BATCH_SIZE=1         # Device당 배치 사이즈
 EPOCHS=100000000
 LR=4e-5
 GRAD_ACCUM_STEPS=128      # Gradient Accumulation Steps
 USE_GRAD_CHECKPOINT=0  # 1=True, 0=False (메모리 절약)
 NUM_WORKERS=32          # Dataloader Workers
-SAVE_STEPS=200           # 매 n 스텝마다 체크포인트 저장
+SAVE_STEPS=500           # 매 n 스텝마다 체크포인트 저장
 LOG_FREQ=50             # 매 n 스텝마다 Validation
+TASK="counting"          # 'pointing' (question/answer) or 'counting' (question_count/answer_count)
 
 # WandB 로그인
 if [ -n "$WANDB_API_KEY" ]; then
@@ -66,6 +68,7 @@ echo "Grad Checkpoint  : $USE_GRAD_CHECKPOINT"
 echo "Save Steps       : $SAVE_STEPS"
 echo "Epochs           : $EPOCHS"
 echo "Log Freq         : $LOG_FREQ"
+echo "Task             : $TASK"
 echo "================================================================"
 
 # 스크립트 실행
@@ -80,4 +83,7 @@ $LAUNCH_CMD train_counting.py \
     --gradient_accumulation_steps "$GRAD_ACCUM_STEPS" \
     --gradient_checkpointing "$USE_GRAD_CHECKPOINT" \
     --save_steps "$SAVE_STEPS" \
-    --log_freq "$LOG_FREQ" 
+    --log_freq "$LOG_FREQ" \
+    --lora_r "$LORA_R" \
+    --lora_alpha "$LORA_ALPHA" \
+    --task "$TASK" 

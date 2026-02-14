@@ -4,12 +4,11 @@
 # Janus-Pro-7B Counting Task Training Script
 # -----------------------------------------------------------------------------
 
-# [설정] WandB API Key (https://wandb.ai/authorize 에서 확인 가능)
-# 여기에 키를 입력하거나, 환경 변수로 설정해 주세요.
+# [설정] WandB API Key (.env 파일에서 로드)
+source ./.env
 export CUDA_VISIBLE_DEVICES=1
 export WANDB_NAME="train[full]_dset[pixmo-count]_ngpu1_bs1_accum128_lr4e-5_ep3_full"
 NUM_GPUS=1
-WANDB_API_KEY="f9831e23517e27f7ecac9b54bc2cdcabb3af8c33" 
 
 # [설정] 사전 학습된 Janus 모델 경로
 # 실제 모델 가중치(config.json, pytorch_model.bin 등)가 있는 디렉토리로 변경해주세요.
