@@ -2,7 +2,7 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 BASE_DIR="/mnt/data1/jiwon/geneval"
-EVAL_BASE_DIR="/mnt/data1/dvlm/counting/generation/geneval"
+EVAL_BASE_DIR="/mnt/data1/dvlm/lumina/counting/generation_eval"
 # RESULTS_ROOT="/mnt/data1/heeji/geneval/results"
 
 # Move to a neutral directory to avoid local mmcv/mmdetection folders
@@ -12,7 +12,7 @@ echo "Starting Evaluation..."
 # echo "Results Root: $RESULTS_ROOT"
 
 # Iterate over all subdirectories in EVAL_BASE_DIR
-parents=( "$EVAL_BASE_DIR"/* )
+parents=( "$EVAL_BASE_DIR"/*/* )
 
 for ((i=${#parents[@]}-1; i>=0; i--)); do
     parent="${parents[i]}"

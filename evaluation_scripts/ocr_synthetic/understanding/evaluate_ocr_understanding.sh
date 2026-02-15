@@ -15,13 +15,13 @@ checkpoint_path="jiwon/Lumina-DiMOO/output"
 
 output_dir_name="baseline"
 torchrun --nproc_per_node=$NGPUS \
-    evaluation_scripts/ocr/understanding/evaluate_ocr_understanding.py \
+    evaluation_scripts/ocr_synthetic/understanding/evaluate_ocr_understanding.py \
     --checkpoint Alpha-VLLM/Lumina-DiMOO \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --output_dir ${base_dir}/dvlm/lumina/ocr/understanding_block512/${output_dir_name} \
-    --steps 512 \
-    --gen_length 512 \
-    --block_length 512 \
+    --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/understanding_block128/${output_dir_name} \
+    --steps 128 \
+    --gen_length 128 \
+    --block_length 128 \
     --num_samples 200
 
 
@@ -30,12 +30,12 @@ torchrun --nproc_per_node=$NGPUS \
 # ---------------------------------------------------------------------------- #
 
 ckpt_list=(
-    "lora128_ocr_4_images_wohead/epoch0"
-    "lora128_ocr_4_images_wohead/epoch2"
-    "lora128_ocr_4_images_wohead/epoch4"
-    "lora128_ocr_4_images_wohead/epoch6"
-    "lora128_ocr_4_images_wohead/epoch8"
-    "lora128_ocr_4_images_wohead/epoch10"
+    # "lora128_ocr_4_images_wohead/epoch0"
+    # "lora128_ocr_4_images_wohead/epoch2"
+    # "lora128_ocr_4_images_wohead/epoch4"
+    # "lora128_ocr_4_images_wohead/epoch6"
+    # "lora128_ocr_4_images_wohead/epoch8"
+    # "lora128_ocr_4_images_wohead/epoch10"
     "lora128_ocr_4_images_wohead/epoch11"
     # "lora128_ocr_4_images_wohead/epoch1"
     # "lora128_ocr_4_images_wohead/epoch3"
@@ -53,14 +53,14 @@ for ckpt in "${ckpt_list[@]}"; do
     echo "========================================"
 
     torchrun --nproc_per_node=$NGPUS \
-        evaluation_scripts/ocr/understanding/evaluate_ocr_understanding.py \
+        evaluation_scripts/ocr_synthetic/understanding/evaluate_ocr_understanding.py \
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/lumina/ocr/understanding_block512/${ckpt} \
-        --steps 512 \
-        --gen_length 512 \
-        --block_length 512 \
+        --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/understanding_block128/${ckpt} \
+        --steps 128 \
+        --gen_length 128 \
+        --block_length 128 \
         --num_samples 200
 done
 
@@ -69,31 +69,31 @@ done
 #                                OCR Generation                                #
 # ---------------------------------------------------------------------------- #
 
-checkpoint_path="dvlm/lumina/checkpoints"
+# checkpoint_path="dvlm/lumina/checkpoints"
 
-ckpt_list=(
-    # Add more checkpoints here...
-    "lora128_ocr_gen_wohead/epoch0"
-    "lora128_ocr_gen_wohead/epoch1"
-    "lora128_ocr_gen_wohead/epoch2"
-    "lora128_ocr_gen_wohead/epoch3"
-)
+# ckpt_list=(
+#     # Add more checkpoints here...
+#     "lora128_ocr_gen_wohead/epoch0"
+#     "lora128_ocr_gen_wohead/epoch1"
+#     "lora128_ocr_gen_wohead/epoch2"
+#     "lora128_ocr_gen_wohead/epoch3"
+# )
 
 
-for ckpt in "${ckpt_list[@]}"; do
-    echo "========================================"
-    echo "Running OCR understanding evaluation for checkpoint: $ckpt"
-    echo "Output directory name: $ckpt"
-    echo "========================================"
+# for ckpt in "${ckpt_list[@]}"; do
+#     echo "========================================"
+#     echo "Running OCR understanding evaluation for checkpoint: $ckpt"
+#     echo "Output directory name: $ckpt"
+#     echo "========================================"
 
-    torchrun --nproc_per_node=$NGPUS \
-        evaluation_scripts/ocr/understanding/evaluate_ocr_understanding.py \
-        --checkpoint Alpha-VLLM/Lumina-DiMOO \
-        --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-        --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/lumina/ocr/understanding_block512/${ckpt} \
-        --steps 512 \
-        --gen_length 512 \
-        --block_length 512 \
-        --num_samples 200
-done
+#     torchrun --nproc_per_node=$NGPUS \
+#         evaluation_scripts/ocr_synthetic/understanding/evaluate_ocr_understanding.py \
+#         --checkpoint Alpha-VLLM/Lumina-DiMOO \
+#         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+#         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
+#         --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/understanding_block128/${ckpt} \
+#         --steps 512 \
+#         --gen_length 512 \
+#         --block_length 512 \
+#         --num_samples 200
+# done

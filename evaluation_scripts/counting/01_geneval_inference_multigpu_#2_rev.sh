@@ -43,9 +43,8 @@ ckpt_list=(
 
 for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
     ckpt="${ckpt_list[i]}"
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "Running inference for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     torchrun --rdzv_endpoint=localhost:25010 --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --height 1024 \
@@ -55,7 +54,7 @@ for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 done
 
@@ -89,9 +88,8 @@ ckpt_list=(
 
 for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
     ckpt="${ckpt_list[i]}"
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "Running inference for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     torchrun --rdzv_endpoint=localhost:25010 --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --height 1024 \
@@ -101,6 +99,6 @@ for ((i=${#ckpt_list[@]}-1; i>=0; i--)); do
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 done

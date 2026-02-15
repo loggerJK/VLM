@@ -19,9 +19,8 @@ base_dir="/mnt/data1"
 # )
 
 # for ckpt in "${ckpt_list[@]}"; do
-#     output_dir_name=$(echo "$ckpt" | tr '/' '_')
 #     echo "Running inference for checkpoint: $ckpt"
-#     echo "Output directory name: $output_dir_name"
+#     echo "Output directory name: $ckpt"
 #     torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
 #         --checkpoint Alpha-VLLM/Lumina-DiMOO \
 #         --height 1024 \
@@ -31,7 +30,7 @@ base_dir="/mnt/data1"
 #         --seed 65513 \
 #         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
 #         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-#         --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
+#         --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
 #         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 # done
 
@@ -99,9 +98,8 @@ ckpt_list=(
 )
 
 for ckpt in "${ckpt_list[@]}"; do # 순방향 인퍼런스
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "Running inference for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --height 1024 \
@@ -111,7 +109,7 @@ for ckpt in "${ckpt_list[@]}"; do # 순방향 인퍼런스
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
 done
 
@@ -131,5 +129,5 @@ torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
     --cfg_scale 4.0 \
     --seed 65513 \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --output_dir ${base_dir}/dvlm/counting/generation/geneval/lumina_${output_dir_name} \
+    --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${output_dir_name} \
     --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl

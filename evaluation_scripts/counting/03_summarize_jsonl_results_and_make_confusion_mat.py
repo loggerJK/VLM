@@ -7,8 +7,15 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from natsort import natsorted
 
+def split_model_epoch(model_name):
+    parts = model_name.split('/')
+    for i, part in enumerate(parts):
+        if part.startswith('epoch'):
+            return '/'.join(parts[:i]), part
+    return model_name, ''
+
 # BASE_DIR = '/mnt/data1/heeji/geneval'
-BASE_DIR = '/mnt/data1/dvlm/generation_eval'
+BASE_DIR = '/mnt/data1/dvlm/lumina/counting/generation_eval'
 
 # List of input folders containing evaluation_results.jsonl
 input_folder_list = []
@@ -23,7 +30,7 @@ for root, dirs, files in os.walk(BASE_DIR):
 input_folder_list = natsorted(input_folder_list)
 
 
-overall_csv_path = '/mnt/data1/dvlm/generation_eval_overall_summary_metrics.csv'
+overall_csv_path = '/mnt/data1/dvlm/lumina/counting/generation_eval_overall_summary_metrics.csv'
 overall_csv_list = []
 
 for input_folder in input_folder_list:
@@ -117,19 +124,19 @@ for input_folder in input_folder_list:
     csv_path = os.path.join(output_dir, 'summary_metrics.csv')
     with open(csv_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Model', 'Accuracy', 'Mean Deviation'])
-        # Using parent folder name as model name for now
-        model_name = os.path.basename(output_dir)
-        writer.writerow([model_name, f"{accuracy:.4f}", f"{mean_deviation:.4f}"])
-        
+        writer.writerow(['Model', 'Epoch', 'Accuracy', 'Mean Deviation'])
+        model_name = os.path.relpath(output_dir, BASE_DIR)
+        model, epoch = split_model_epoch(model_name)
+        writer.writerow([model, epoch, f"{accuracy:.4f}", f"{mean_deviation:.4f}"])
+
     # Append to overall summary
-    overall_csv_list.append([model_name, f"{accuracy:.4f}", f"{mean_deviation:.4f}"])
+    overall_csv_list.append([model, epoch, f"{accuracy:.4f}", f"{mean_deviation:.4f}"])
 
     print(f"Saved summary metrics to: {csv_path}")
     
 # Write overall summary CSV
 with open(overall_csv_path, 'w', newline='') as overall_csv_file:
     overall_writer = csv.writer(overall_csv_file)
-    overall_writer.writerow(['Model', 'Accuracy', 'Mean Deviation'])
+    overall_writer.writerow(['Model', 'Epoch', 'Accuracy', 'Mean Deviation'])
     for row in overall_csv_list:
         overall_writer.writerow(row)

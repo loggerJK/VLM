@@ -24,7 +24,7 @@ echo "========================================"
 PYTHONPATH=${base_dir}/heeji/VLM torchrun --nproc_per_node=$ngpus --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} ${base_dir}/heeji/VLM/evaluate_cvbench_counting_multigpu.py \
     --checkpoint Alpha-VLLM/Lumina-DiMOO \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --output_dir ${base_dir}/dvlm/counting/understanding/cvbench/${output_dir_name} \
+    --output_dir ${base_dir}/dvlm/lumina/counting/understanding_eval_cvbench/${output_dir_name} \
     --steps 20 \
     --gen_length 20 \
     --block_length 20
@@ -65,20 +65,19 @@ ckpt_list=(
 )
 
 for ckpt in "${ckpt_list[@]}"; do
-    output_dir_name=$(echo "$ckpt" | tr '/' '_') # Replace '/' with '_'
     echo "========================================"
     echo "Running evaluation for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     echo "========================================"
-    
+
     PYTHONPATH=${base_dir}/heeji/VLM torchrun --nproc_per_node=$ngpus --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} ${base_dir}/heeji/VLM/evaluate_cvbench_counting_multigpu.py \
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/understanding/cvbench/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/understanding_eval_cvbench/${ckpt} \
         --steps 20 \
         --gen_length 20 \
-        --block_length 20 
+        --block_length 20
 done
 
 base_dir="/mnt/data1"
@@ -140,18 +139,17 @@ ckpt_list=(
 )
 
 for ckpt in "${ckpt_list[@]}"; do
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "========================================"
     echo "Running evaluation for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     echo "========================================"
-    
+
     PYTHONPATH=${base_dir}/heeji/VLM torchrun --nproc_per_node=$ngpus --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} ${base_dir}/heeji/VLM/evaluate_cvbench_counting_multigpu.py \
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/understanding/cvbench/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/understanding_eval_cvbench/${ckpt} \
         --steps 20 \
         --gen_length 20 \
-        --block_length 20 
+        --block_length 20
 done

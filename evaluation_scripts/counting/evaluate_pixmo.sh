@@ -43,17 +43,16 @@ ckpt_list=(
 )
 
 for ckpt in "${ckpt_list[@]}"; do
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "========================================"
     echo "Running evaluation for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     echo "========================================"
-    
+
     torchrun --nproc_per_node=$ngpus evaluate_pixmo_multigpu.py \
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/understanding/pixmo/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/understanding_eval/${ckpt} \
         --steps 20 \
         --gen_length 20 \
         --block_length 20
@@ -118,18 +117,17 @@ ckpt_list=(
 )
 
 for ckpt in "${ckpt_list[@]}"; do
-    output_dir_name=$(echo "$ckpt" | tr '/' '_')
     echo "========================================"
     echo "Running evaluation for checkpoint: $ckpt"
-    echo "Output directory name: $output_dir_name"
+    echo "Output directory name: $ckpt"
     echo "========================================"
-    
+
     torchrun --nproc_per_node=$ngpus --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} evaluate_pixmo_multigpu.py \
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/counting/understanding/pixmo/${output_dir_name} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/understanding_eval/${ckpt} \
         --steps 20 \
         --gen_length 20 \
-        --block_length 20 
+        --block_length 20
 done

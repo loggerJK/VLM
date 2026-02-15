@@ -41,6 +41,7 @@ import xllmx.util.misc as misc
 from fairscale.nn.model_parallel import initialize as fs_init
 
 # Image Utils
+from utils.ocr_render import generate_image as generate_ocr_image
 from utils.image_utils import encode_img_with_breaks, generate_crop_size_list, var_center_crop, var_edge_pad, encode_img_with_breaks_fixed, add_break_line, decode_vq_to_image, calculate_vq_params
 # Generation Utils
 from generators.text_understanding_generator import generate_text_understanding
@@ -272,6 +273,10 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 answer = data_item.get('answer', "")
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
                 image = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
+            elif task == 'ocr_synthetic':
+                answer = data_item['answer']
+                question = "Extract all text from the image."
+                image = generate_ocr_image('# ' + answer, template="random", width=self.und_image_size, height=self.und_image_size, quality=100)
             elif task == 'pointing':
                 question = data_item.get('question', data_item.get('text', ''))
                 answer = str(data_item.get('answer', data_item.get('label', '')))
@@ -400,7 +405,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -413,6 +418,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--count_lower_limit", type=int, default=None, help="Lower limit for count. 0 means count>=0.")
         parser.add_argument("--eval_everything", action="store_true",
                             help="Run both understanding and generation validation regardless of --mode")
+        parser.add_argument("--debug", action="store_true", help="Enable debug mode with smaller dataset and more frequent validation")
 
         return parser
     
@@ -494,7 +500,7 @@ class Solver(FinetuneSolverBase):
         super().__init__(args)
 
         # Pre-download NLTK data and metrics for OCR task
-        if self.args.task == 'ocr':
+        if self.args.task in ['ocr', 'ocr_synthetic']:
             if self.global_rank == 0:
                 print("[Solver] Pre-loading NLTK data and metrics for OCR...")
                 try:
@@ -804,6 +810,24 @@ class Solver(FinetuneSolverBase):
                 answer = item.get('answer', '')
                 caption = f"An image containing the text: {answer}" if answer else "Generate an image."
                 self.validation_prompts.append(caption)
+                
+        elif self.args.task == 'ocr_synthetic':
+            self.validation_prompts = []
+            val_ds = self.val_ds
+            rng = random.Random(42)
+            indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
+            for idx in indices:
+                item = val_ds[idx]
+                answer = item.get('answer', '')
+                caption = (
+                    f"A Mathpix Markdown format with sharp, legible black text. "
+                    f"High-resolution typography, top-down view. "
+                    f"The text is rendered in natural left-to-right, top-to-bottom reading order. "
+                    # f"Use Mathpix Markdown format: tables as LaTeX, mathematical expressions in LaTeX notation, "
+                    # f"and keep all tables and captions at the end. "
+                    f"The text reads:\n"
+                    f"{answer}") if answer else "Generate an image."
+                self.validation_prompts.append(caption)
         else:
             if self.global_rank == 0:
                 print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
@@ -949,8 +973,52 @@ class Solver(FinetuneSolverBase):
     def _dataset_func(self):
         if self.args.task == 'ocr':
             return self._load_ocr_dataset()
+        elif self.args.task == 'ocr_synthetic':
+            return self._load_synthetic_ocr_dataset()
         else:
             return self._load_counting_pointing_dataset()
+        
+    def _load_synthetic_ocr_dataset(self):
+        print("[Solver] Loading Synthetic OCR Dataset...")
+        
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+        
+        raw_dataset = load_dataset("agentlans/high-quality-english-sentences", split="train")
+
+        # Filter 200K
+        raw_dataset = raw_dataset.select(list(range(0, 200_000)))
+        train_und_ds = raw_dataset.map(
+            lambda text: {
+                'descriptions': None,
+                'answer': text.replace("\n", " ").strip()[:120]
+            },
+            input_columns=['text'], num_proc=64
+        )
+        # gen 데이터셋: answer를 descriptions로 매핑하여 생성
+        train_gen_ds = raw_dataset.map(
+            lambda text: {
+                'descriptions':
+                    f"A Mathpix Markdown format with sharp, legible black text. "
+                    f"High-resolution typography, top-down view. "
+                    f"The text is rendered in natural left-to-right, top-to-bottom reading order. "
+                    f"The text reads:\n"
+                    f"{text}"
+            },
+            input_columns=['text'], num_proc=64
+        )
+        raw_dataset_val = load_dataset("agentlans/high-quality-english-sentences", split="test")
+        raw_dataset_val = raw_dataset_val.select(list(range(0, min(self.args.validation_samples, len(raw_dataset_val)))))
+        self.val_ds = raw_dataset_val.map(
+            lambda text: {
+                'descriptions': None,
+                'answer': text.replace("\n", " ").strip()[:120]
+            },
+            input_columns=['text'], num_proc=64
+        )
+        
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='ocr_synthetic', mode=self.args.mode)
+        
+        
 
     def _load_ocr_dataset(self):
         print("[Solver] Loading OCR Dataset...")
@@ -1345,12 +1413,19 @@ class Solver(FinetuneSolverBase):
         local_images = []
 
         for idx, item in tqdm(enumerate(local_dataset_list), total=len(local_dataset_list), desc=f"[Rank {local_rank}] OCR Validation", disable=(local_rank != 0)):
-            image = item['image']
             question = item.get('question', "Extract all text from the image.")
             answer_gt = item.get('answer', "")
 
-            crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
-            image_processed = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
+            if self.args.task == 'ocr_synthetic':
+                image_processed = generate_ocr_image('# ' + answer_gt, template="clean_light", width=self.args.und_image_size, height=self.args.und_image_size, quality=100)
+            else:
+                image = item['image']
+                from io import BytesIO
+                from PIL import Image
+                if isinstance(image, dict) and 'bytes' in image:
+                    image = Image.open(BytesIO(image['bytes'])).convert("RGB")
+                crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                image_processed = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
             input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
             img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
 
@@ -1485,7 +1560,7 @@ class Solver(FinetuneSolverBase):
         run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
 
         if run_und and self.args.wandb_run_id is None:
-            if self.args.task == 'ocr':
+            if self.args.task in ['ocr', 'ocr_synthetic']:
                 self.validate_ocr(self.start_epoch)
                 pass
             else:
@@ -1728,7 +1803,7 @@ class Solver(FinetuneSolverBase):
                     with torch.no_grad():
                         image_tokens = encode_img_with_breaks(img, self.vqvae)
 
-                    if self.args.task == 'ocr':
+                    if self.args.task in ['ocr', 'ocr_synthetic']:
                         instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + \
                                       "<user>" + question + "</user>"
                     else:
@@ -1825,7 +1900,7 @@ class Solver(FinetuneSolverBase):
                     run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
 
                     if run_und:
-                        if self.args.task == 'ocr':
+                        if self.args.task in ['ocr', 'ocr_synthetic']:
                             self.validate_ocr(epoch)
                         else:
                             self.validate(epoch, split="train")

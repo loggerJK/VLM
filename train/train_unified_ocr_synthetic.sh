@@ -28,7 +28,7 @@ accum_iter=32
 dropout=0.05
 lora_rank=128
 max_seq_len=2048
-exp_name="lora128_ocr_wohead"
+exp_name="lora128_ocr_synthetic_wohead"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
@@ -37,7 +37,7 @@ source .env
 
 mkdir -p "$output_dir"
 
-echo "Starting OCR training (unified)..."
+echo "Starting OCR Synthetic training (unified)..."
 echo "Output Directory: $output_dir"
 
 # Torchrun 실행
@@ -45,7 +45,7 @@ python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
     --master_port=29506 \
     train/train_unified.py \
-    --task ocr \
+    --task ocr_synthetic \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter ${accum_iter} \
     --epochs ${epochs} \
@@ -74,5 +74,5 @@ python -m torch.distributed.run \
     --lora_rank ${lora_rank} \
     --ckpt_max_keep ${ckpt_max_keep} \
     --wo_lm_head \
-    --dataset_path "Jiwon-Kang/Llama-Nemotron-VLM-Dataset-v1-OCR4" \
+    --eval_everything \
     2>&1 | tee "$output_dir/output.log"

@@ -2,7 +2,7 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 BASE_DIR="/mnt/data1/jiwon/geneval"
-EVAL_BASE_DIR="/mnt/data1/dvlm/counting/generation/geneval"
+EVAL_BASE_DIR="/mnt/data1/dvlm/lumina/counting/generation_eval"
 # RESULTS_ROOT="/mnt/data1/heeji/geneval/results"
 
 # Move to a neutral directory to avoid local mmcv/mmdetection folders
@@ -43,7 +43,7 @@ PARENTS=(
 
 for parent in "${PARENTS[@]}"; do
     # reference:  output_dir_name=$(echo "$ckpt" | tr '/' '_')
-    parent="${EVAL_BASE_DIR}/lumina_$(echo "$parent" | tr '/' '_')"
+    parent="${EVAL_BASE_DIR}/lumina_${parent}"
     
     if [ ! -d "$parent" ]; then
         echo "[SKIP] Not found: $parent"
