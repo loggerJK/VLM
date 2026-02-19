@@ -4,12 +4,23 @@
 from .interleave_datasets import UnifiedEditIterableDataset
 from .t2i_dataset import T2IIterableDataset
 from .vlm_dataset import SftJSONLIterableDataset
+from .hf_dataset import (
+    HFCountingUndDataset, HFCountingGenDataset,
+    HFOCRUndDataset, HFOCRGenDataset,
+    HFSyntheticOCRUndDataset, HFSyntheticOCRGenDataset,
+)
 
 
 DATASET_REGISTRY = {
     't2i_pretrain': T2IIterableDataset,
     'vlm_sft': SftJSONLIterableDataset,
     'unified_edit': UnifiedEditIterableDataset,
+    'counting_und': HFCountingUndDataset,
+    'counting_gen': HFCountingGenDataset,
+    'ocr_und': HFOCRUndDataset,
+    'ocr_gen': HFOCRGenDataset,
+    'ocr_synthetic_und': HFSyntheticOCRUndDataset,
+    'ocr_synthetic_gen': HFSyntheticOCRGenDataset,
 }
 
 
@@ -35,5 +46,24 @@ DATASET_INFO = {
 			'jsonl_path': 'your_data_path/bagel_example/vlm/llava_ov_si.jsonl',
 			'num_total_samples': 1000
 		},
+    },
+    # HF datasets: data_dir is unused, set to empty string
+    'counting_und': {
+        'pixmo': {'data_dir': ''},
+    },
+    'counting_gen': {
+        'pixmo': {'data_dir': ''},
+    },
+    'ocr_und': {
+        'ocr': {'data_dir': ''},
+    },
+    'ocr_gen': {
+        'ocr': {'data_dir': ''},
+    },
+    'ocr_synthetic_und': {
+        'sentences': {'data_dir': ''},
+    },
+    'ocr_synthetic_gen': {
+        'sentences': {'data_dir': ''},
     },
 }

@@ -45,18 +45,39 @@ class FSDPConfig:
         self.num_shard = num_shard
 
 
-def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
+def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[], use_lora=False):
     if fsdp_config.sharding_strategy == 'HYBRID_SHARD':
         device_mesh = init_device_mesh(
-            "cuda", 
+            "cuda",
             mesh_shape=(fsdp_config.num_replicate, fsdp_config.num_shard),
             mesh_dim_names=("replicate", "shard")
         )
     else:
         device_mesh = None
-    return FSDP(
-        original_model,
-        auto_wrap_policy=functools.partial(
+
+    if use_lora and fsdp_config.sharding_strategy not in ("NO_SHARD",):
+        # peft's fsdp_auto_wrap_policy creates an OR policy that:
+        # 1) wraps trainable LoRA leaf modules as separate FSDP units
+        # 2) wraps transformer blocks as FSDP units
+        # This separates frozen base params from trainable LoRA params.
+        #
+        # Only include class names that actually exist in the model,
+        # because peft raises an error if any name fails to resolve.
+        candidate_cls_names = {
+            "Qwen2DecoderLayer", "Qwen2MoEDecoderLayer", "Qwen2MoTDecoderLayer",
+            "SiglipEncoderLayer", "SiglipVisionTransformer", "MLPconnector",
+        }
+        target_cls_names = set()
+        for module in original_model.modules():
+            name = type(module).__name__
+            if name in candidate_cls_names:
+                target_cls_names.add(name)
+
+        os.environ["FSDP_TRANSFORMER_CLS_TO_WRAP"] = ",".join(target_cls_names)
+        from peft.utils.other import fsdp_auto_wrap_policy
+        auto_wrap_policy = fsdp_auto_wrap_policy(original_model)
+    else:
+        auto_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
             transformer_layer_cls={
                 Qwen2DecoderLayer,
@@ -68,7 +89,11 @@ def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
                 TimestepEmbedder,
                 PositionEmbedding,
             },
-        ),
+        )
+
+    return FSDP(
+        original_model,
+        auto_wrap_policy=auto_wrap_policy,
         ignored_modules=ignored_modules,
         mixed_precision=MixedPrecision(
             param_dtype=torch.bfloat16,
@@ -80,23 +105,28 @@ def fsdp_wrapper(original_model, fsdp_config, ignored_modules=[]):
         backward_prefetch=BackwardPrefetch[fsdp_config.backward_prefetch],
         cpu_offload=CPUOffload(offload_params=fsdp_config.cpu_offload),
         device_mesh=device_mesh,
+        use_orig_params=use_lora,
     )
 
 
 class FSDPCheckpoint:
     @staticmethod
     def fsdp_save_ckpt(
-        ckpt_dir, 
-        train_steps, 
-        model, 
-        ema_model, 
-        optimizer, 
-        scheduler, 
+        ckpt_dir,
+        train_steps,
+        model,
+        ema_model,
+        optimizer,
+        scheduler,
         data_status,
-        logger, 
+        logger,
         fsdp_config,
+        use_lora=False,
+        save_name=None,
     ):
-        save_path = os.path.join(ckpt_dir, f"{train_steps:07d}")
+        if save_name is None:
+            save_name = f"step{train_steps}"
+        save_path = os.path.join(ckpt_dir, save_name)
         os.makedirs(save_path, exist_ok=True)
         logger.info(f"Saving checkpoint to {save_path}.")
 
@@ -117,28 +147,43 @@ class FSDPCheckpoint:
         ):
             model_state_dict = model.state_dict()
             if dist.get_rank() == 0:
-                save_file(model_state_dict, os.path.join(save_path, "model.safetensors"))
+                if use_lora:
+                    # Save only LoRA adapter weights
+                    lora_state_dict = {
+                        k: v for k, v in model_state_dict.items()
+                        if "lora_" in k or "modules_to_save" in k
+                    }
+                    save_file(lora_state_dict, os.path.join(save_path, "adapter_model.safetensors"))
+                    # Save adapter_config.json via peft
+                    peft_model = model.module if hasattr(model, 'module') else model
+                    if hasattr(peft_model, 'peft_config'):
+                        for _, peft_cfg in peft_model.peft_config.items():
+                            peft_cfg.save_pretrained(save_path)
+                            break
+                    logger.info(f"Saved LoRA adapter ({len(lora_state_dict)} tensors) to {save_path}")
+                else:
+                    save_file(model_state_dict, os.path.join(save_path, "model.safetensors"))
 
         with FSDP.state_dict_type(model, StateDictType.LOCAL_STATE_DICT):
-            if fsdp_config.sharding_strategy == "FULL_SHARD":
+            if fsdp_config.sharding_strategy in ("FULL_SHARD", "NO_SHARD"):
                 shard_index = dist.get_rank()
                 total_shards = dist.get_world_size()
             elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
                 shard_index = dist.get_rank() % fsdp_config.num_shard
                 total_shards = fsdp_config.num_shard
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f"Unsupported sharding strategy: {fsdp_config.sharding_strategy}")
 
             optimizer_save_path = os.path.join(
                 save_path, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"
             )
-            if fsdp_config.sharding_strategy == "FULL_SHARD":
+            if fsdp_config.sharding_strategy in ("FULL_SHARD", "NO_SHARD"):
                 torch.save(optimizer.state_dict(), optimizer_save_path)
             elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
                 if dist.get_rank() < fsdp_config.num_shard:
                     torch.save(optimizer.state_dict(), optimizer_save_path)
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f"Unsupported sharding strategy: {fsdp_config.sharding_strategy}")
 
         if dist.get_rank() == 0 and scheduler is not None:
             torch.save(scheduler.state_dict(), os.path.join(save_path, "scheduler.pt"))
@@ -186,14 +231,14 @@ class FSDPCheckpoint:
     @staticmethod
     def try_load_train_state(resume_from, optimizer, scheduler, fsdp_config):
         if resume_from is not None and os.path.exists(resume_from):
-            if fsdp_config.sharding_strategy == "FULL_SHARD":
+            if fsdp_config.sharding_strategy in ("FULL_SHARD", "NO_SHARD"):
                 shard_index = dist.get_rank()
                 total_shards = dist.get_world_size()
             elif fsdp_config.sharding_strategy == "HYBRID_SHARD":
                 shard_index = dist.get_rank() % fsdp_config.num_shard
                 total_shards = fsdp_config.num_shard
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f"Unsupported sharding strategy: {fsdp_config.sharding_strategy}")
 
             optimizer_state_dict_path = os.path.join(
                 resume_from, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"

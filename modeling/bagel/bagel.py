@@ -163,7 +163,7 @@ class Bagel(PreTrainedModel):
         else:
             attention_mask = nested_attention_masks
 
-        if self.config.visual_und:
+        if self.config.visual_und and vit_token_seqlens is not None:
             cu_seqlens = torch.nn.functional.pad(torch.cumsum(vit_token_seqlens, dim=0), (1, 0))
             cu_seqlens = cu_seqlens.to(torch.int32)
             max_seqlen = torch.max(vit_token_seqlens).item()
@@ -178,7 +178,7 @@ class Bagel(PreTrainedModel):
             packed_vit_token_embed = packed_vit_token_embed + vit_token_pos_emb
             packed_sequence[packed_vit_token_indexes] = packed_vit_token_embed
 
-        if self.config.visual_gen:
+        if self.config.visual_gen and padded_latent is not None:
             p = self.latent_patch_size
             packed_latent = []
             for latent, (h, w) in zip(padded_latent, patchified_vae_latent_shapes):
@@ -215,7 +215,7 @@ class Bagel(PreTrainedModel):
         )
 
         mse = None
-        if self.config.visual_gen:
+        if self.config.visual_gen and mse_loss_indexes is not None:
             packed_mse_preds = self.llm2vae(last_hidden_state[mse_loss_indexes])
             target = noise - packed_latent_clean # NOTE: v_t=dx_t/dt=x_1-x_0, pointing from data to noise
             has_mse = packed_timesteps > 0

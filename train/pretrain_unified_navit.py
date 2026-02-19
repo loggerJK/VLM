@@ -6,7 +6,7 @@ import gc
 import os
 import wandb
 import yaml
-from copy import deepcopy
+import bitsandbytes as bnb
 from dataclasses import dataclass, field
 from time import time
 from typing import Optional
@@ -34,10 +34,10 @@ from modeling.bagel import (
 from modeling.qwen2 import Qwen2Tokenizer
 from train.train_utils import create_logger, get_latest_ckpt
 from train.fsdp_utils import (
-    FSDPCheckpoint, FSDPConfig, grad_checkpoint_check_fn, fsdp_wrapper, 
-    fsdp_ema_setup, fsdp_ema_update,
+    FSDPCheckpoint, FSDPConfig, grad_checkpoint_check_fn, fsdp_wrapper,
 )
-
+from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
+from tqdm import tqdm
 
 def count_parameters(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
@@ -178,6 +178,45 @@ class DataArguments:
         default="data/configs/example.yaml",
         metadata={"help": "YAML file specifying dataset groups, weights, and preprocessing rules."}
     )
+    task: str = field(
+        default=None,
+        metadata={
+            "help": "Task type for multi-task training. When set, overrides dataset_config_file. "
+                    "Choices: counting, ocr, ocr_synthetic. Leave None to use dataset_config_file."
+        }
+    )
+    mode: str = field(
+        default="und",
+        metadata={"help": "Task mode: 'und' (understanding only), 'gen' (generation only), 'both'."}
+    )
+    hf_dataset_path: str = field(
+        default=None,
+        metadata={"help": "HuggingFace dataset path for OCR task (e.g. 'naver-clova-ix/cord-v2')."}
+    )
+    validation_interval: int = field(
+        default=500,
+        metadata={"help": "Run validation every N training steps. Set 0 to disable."}
+    )
+    validation_samples: int = field(
+        default=100,
+        metadata={"help": "Number of samples to use for validation."}
+    )
+    eval_everything: bool = field(
+        default=False,
+        metadata={"help": "Run understanding validation regardless of --mode (e.g. even in gen-only mode)."}
+    )
+    eval_before_training: bool = field(
+        default=False,
+        metadata={"help": "Run validation once before training starts (at step 0)."}
+    )
+    val_gen_resolution: int = field(
+        default=512,
+        metadata={"help": "Resolution for validation image generation (default: 512)."}
+    )
+    val_gen_num_images: int = field(
+        default=5,
+        metadata={"help": "Number of images to generate during validation."}
+    )
     prefetch_factor: int = field(
         default=2,
         metadata={"help": "How many batches each DataLoader worker pre-loads in advance."}
@@ -242,7 +281,7 @@ class TrainingArguments:
         metadata={"help": "Unique identifier to resume a previous W&B run, if desired."}
     )
     wandb_resume: str = field(
-        default="allow",
+        default="never",
         metadata={"help": "W&B resume mode: 'allow', 'must', or 'never'."}
     )
     wandb_offline: bool = field(
@@ -292,7 +331,8 @@ class TrainingArguments:
 
     # --- optimization & scheduler ---
     warmup_steps: int = field(
-        default=2000,
+        # default=2000,
+        default=0,
         metadata={"help": "Linear warm-up steps before applying the main LR schedule."}
     )
     lr_scheduler: str = field(
@@ -396,13 +436,442 @@ class TrainingArguments:
         metadata={"help": "Freeze the visual understanding connector layers."}
     )
     copy_init_moe: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Duplicate initial MoE experts so each has identical initialisation."}
     )
     use_flex: bool = field(
         default=False,
         metadata={"help": "Enable FLEX (flash-ext friendly) packing algorithm for sequence data."}
     )
+
+    # --- LoRA ---
+    use_lora: bool = field(
+        default=False,
+        metadata={"help": "Enable LoRA (Low-Rank Adaptation) fine-tuning."}
+    )
+    lora_rank: int = field(
+        default=128,
+        metadata={"help": "LoRA rank (r)."}
+    )
+    lora_alpha: int = field(
+        default=256,
+        metadata={"help": "LoRA scaling alpha."}
+    )
+    lora_dropout: float = field(
+        default=0.05,
+        metadata={"help": "LoRA dropout probability."}
+    )
+    lora_target_modules: str = field(
+        default="q_proj,k_proj,v_proj,o_proj",
+        metadata={"help": "Comma-separated list of module names to apply LoRA to."}
+    )
+    lora_ckpt_path: str = field(
+        default=None,
+        metadata={"help": "Path to a saved LoRA adapter checkpoint to resume from."}
+    )
+
+
+def build_task_dataset_meta(task, mode, hf_dataset_path=None):
+    """Build dataset_meta dict dynamically from task and mode, instead of YAML.
+
+    Returns a dict in the same format as a parsed YAML config file, suitable
+    for passing to ``DataConfig(grouped_datasets=...)``.
+    """
+    UND_IMAGE_ARGS = {
+        "image_stride": 14,
+        "max_image_size": 980,
+        "min_image_size": 378,
+        "max_pixels": 2_007_040,
+    }
+    GEN_IMAGE_ARGS = {
+        "image_stride": 16,
+        "max_image_size": 1024,
+        "min_image_size": 512,
+    }
+
+    dataset_meta = {}
+
+    if task == "counting":
+        if mode in ("und", "both"):
+            dataset_meta["counting_und"] = {
+                "dataset_names": ["pixmo"],
+                "image_transform_args": dict(UND_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+        if mode in ("gen", "both"):
+            dataset_meta["counting_gen"] = {
+                "dataset_names": ["pixmo"],
+                "image_transform_args": dict(GEN_IMAGE_ARGS),
+                "is_mandatory": mode == "gen",
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+
+    elif task == "ocr":
+        extra = {}
+        if hf_dataset_path:
+            extra["hf_dataset_path"] = hf_dataset_path
+        if mode in ("und", "both"):
+            dataset_meta["ocr_und"] = {
+                "dataset_names": ["ocr"],
+                "image_transform_args": dict(UND_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+                **extra,
+            }
+        if mode in ("gen", "both"):
+            dataset_meta["ocr_gen"] = {
+                "dataset_names": ["ocr"],
+                "image_transform_args": dict(GEN_IMAGE_ARGS),
+                "is_mandatory": mode == "gen",
+                "num_used_data": [-1],
+                "weight": 1,
+                **extra,
+            }
+
+    elif task == "ocr_synthetic":
+        if mode in ("und", "both"):
+            dataset_meta["ocr_synthetic_und"] = {
+                "dataset_names": ["sentences"],
+                "image_transform_args": dict(UND_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+        if mode in ("gen", "both"):
+            dataset_meta["ocr_synthetic_gen"] = {
+                "dataset_names": ["sentences"],
+                "image_transform_args": dict(GEN_IMAGE_ARGS),
+                "is_mandatory": mode == "gen",
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+
+    else:
+        raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, or ocr_synthetic.")
+
+    if not dataset_meta:
+        raise ValueError(f"No datasets configured for task={task!r}, mode={mode!r}")
+
+    return dataset_meta
+
+
+def _load_validation_dataset(task, mode, hf_dataset_path=None, num_samples=100):
+    """Load a small validation split for the given task."""
+    from datasets import load_dataset as hf_load_dataset
+
+    if task == "counting":
+        if mode == 'und':
+            ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="val_und")
+        elif mode == 'gen':
+            ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="val_gen")
+        else:
+            raise ValueError(f"Invalid mode {mode} for counting task validation")
+        # Use the last N samples as validation
+        n = min(num_samples, len(ds))
+        ds = ds.select(range(len(ds) - n, len(ds)))
+        return ds
+
+    elif task == "ocr":
+        assert hf_dataset_path is not None, "hf_dataset_path required for OCR validation"
+        ds = hf_load_dataset(hf_dataset_path, split="train")
+        n = min(num_samples, len(ds))
+        ds = ds.select(range(len(ds) - n, len(ds)))
+        return ds
+
+    elif task == "ocr_synthetic":
+        ds = hf_load_dataset("agentlans/high-quality-english-sentences", split="test")
+        n = min(num_samples, len(ds))
+        ds = ds.select(range(n))
+        return ds
+
+    return None
+
+
+def _setup_val_gen_prompts(val_ds, task, num_prompts=5):
+    """Extract text prompts from val_ds for generation validation."""
+    import random
+    rng = random.Random(42)
+    indices = rng.sample(range(len(val_ds)), min(num_prompts, len(val_ds)))
+    prompts = []
+    for idx in indices:
+        item = val_ds[idx]
+        if task == "counting":
+            caption = item['descriptions']
+            print(f"prompt: {caption}")
+            if isinstance(caption, list):
+                caption = caption[0]
+        elif task == "ocr":
+            answer = item.get("text", item.get("answer", "Hello World"))
+            caption = f"An image containing the text: {answer}"
+        elif task == "ocr_synthetic":
+            answer = item.get("text", "Hello World").replace("\n", " ").strip()[:120]
+            caption = (
+                "A clean image with sharp, legible black text on white background. "
+                f"The text reads: {answer}"
+            )
+        else:
+            caption = "A beautiful landscape photograph."
+        prompts.append(caption)
+        
+    return prompts
+
+
+@torch.no_grad()
+def validate_generation(
+    model, vae_model, tokenizer, new_token_ids,
+    prompts, resolution, device, logger,
+    num_timesteps=50, cfg_scale=4.0, timestep_shift=3.0,
+):
+    """Generate images from text prompts and return wandb.Image list for logging."""
+    from modeling.bagel.qwen2_navit import NaiveCache
+    from PIL import Image as PILImage
+
+    model = model.module if hasattr(model, 'module') else model
+    model.eval()
+    num_hidden_layers = model.config.llm_config.num_hidden_layers
+    images = []
+
+    for i, prompt in enumerate(prompts):
+        try:
+            # 1. Encode text prompt into KV cache
+            past_key_values = NaiveCache(num_hidden_layers)
+            newlens = [0]
+            new_rope = [0]
+
+            generation_input, newlens, new_rope = model.prepare_prompts(
+                curr_kvlens=newlens, curr_rope=new_rope,
+                prompts=[prompt], tokenizer=tokenizer,
+                new_token_ids=new_token_ids,
+            )
+            generation_input = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                for k, v in generation_input.items()}
+
+            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                past_key_values = model.forward_cache_update_text(
+                    past_key_values, **generation_input
+                )
+
+            # 2. Prepare latent generation input
+            generation_input = model.prepare_vae_latent(
+                curr_kvlens=newlens, curr_rope=new_rope,
+                image_sizes=[(resolution, resolution)],
+                new_token_ids=new_token_ids,
+            )
+            generation_input = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                for k, v in generation_input.items()}
+
+            # 3. Prepare CFG (text-only unconditional)
+            cfg_past_key_values = NaiveCache(num_hidden_layers)
+            cfg_newlens = [0]
+            cfg_new_rope = [0]
+            generation_input_cfg = model.prepare_vae_latent_cfg(
+                curr_kvlens=cfg_newlens, curr_rope=cfg_new_rope,
+                image_sizes=[(resolution, resolution)],
+            )
+            generation_input_cfg = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                                    for k, v in generation_input_cfg.items()}
+
+            # 4. Generate image (flow denoising)
+            with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
+                unpacked_latent = model.generate_image(
+                    past_key_values=past_key_values,
+                    num_timesteps=num_timesteps,
+                    cfg_text_scale=cfg_scale,
+                    cfg_interval=[0, 1.0],
+                    cfg_renorm_min=0.0,
+                    timestep_shift=timestep_shift,
+                    cfg_text_past_key_values=cfg_past_key_values,
+                    cfg_text_packed_position_ids=generation_input_cfg["cfg_packed_position_ids"],
+                    cfg_text_key_values_lens=generation_input_cfg["cfg_key_values_lens"],
+                    cfg_text_packed_query_indexes=generation_input_cfg["cfg_packed_query_indexes"],
+                    cfg_text_packed_key_value_indexes=generation_input_cfg["cfg_packed_key_value_indexes"],
+                    **generation_input,
+                )
+
+                # 5. Decode latent -> PIL image
+                latent = unpacked_latent[0]
+                h, w = resolution // 16, resolution // 16
+                latent = latent.reshape(1, h, w, 2, 2, 16)
+                latent = torch.einsum("nhwpqc->nchpwq", latent)
+                latent = latent.reshape(1, 16, h * 2, w * 2)
+                image = vae_model.decode(latent.to(device))
+            image = ((image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255).to(torch.uint8).cpu().numpy()
+            pil_img = PILImage.fromarray(image)
+            pil_img.save(f"val_gen_{i}.png")
+
+            images.append(wandb.Image(pil_img, caption=prompt[:100]))
+            logger.info(f"  Generated image {i+1}/{len(prompts)}")
+
+        except Exception as e:
+            logger.warning(f"Generation validation error at prompt {i}: {e}")
+            continue
+
+    model.train()
+
+    metrics = {}
+    metrics["val_generated_images"] = images
+    return metrics
+
+
+@torch.no_grad()
+def validate_understanding(
+    model, tokenizer, new_token_ids, image_transform, val_ds, task, device, logger,
+):
+    """Run validation on a small dataset and return metrics.
+
+    Uses Bagel.chat() for autoregressive inference, then computes:
+    - counting: accuracy (exact match) and MAD (mean absolute deviation)
+    - ocr / ocr_synthetic: exact-match accuracy and simple character error rate
+    """
+    from data.data_utils import pil_img2rgb
+
+    model = model.module if hasattr(model, 'module') else model
+    model.eval()
+    correct = 0
+    total = 0
+    mad_sum = 0.0
+    cer_sum = 0.0
+
+    n_samples = min(100, len(val_ds))  # Limit to 20 for speed
+    indices = list(range(n_samples))
+
+    for idx in indices:
+        try:
+            item = val_ds[idx]
+
+            if task == "counting":
+                image = pil_img2rgb(item["image"])
+                question = item.get("question_count") or item.get("question")
+                answer_gt = str(item.get("answer_count") or item.get("answer"))
+            elif task == "ocr":
+                image = pil_img2rgb(item["image"])
+                question = "Extract all text from the image."
+                answer_gt = item.get("text", item.get("answer", item.get("ground_truth", "")))
+            elif task == "ocr_synthetic":
+                from data.ocr_render import generate_image as generate_ocr_image
+                raw_text = item["text"]
+                answer_gt = raw_text.replace("\n", " ").strip()[:120]
+                question = "Extract all text from the image."
+                image = generate_ocr_image(
+                    "# " + answer_gt, template="clean_light",
+                    width=512, height=512, quality=100,
+                )
+                image = pil_img2rgb(image)
+            else:
+                continue
+
+            pred = model.chat(
+                tokenizer, new_token_ids, image_transform,
+                images=[image], prompt=question, max_length=128,
+            )
+            pred = pred.strip()
+
+            if task == "counting":
+                # Try to extract number from prediction
+                pred_num = int("".join(c for c in pred if c.isdigit()) or "-1")
+                gt_num = int("".join(c for c in answer_gt if c.isdigit()) or "-1")
+                if pred_num == gt_num:
+                    correct += 1
+                mad_sum += abs(pred_num - gt_num)
+                print(f"="*50)
+                print(f"Question: \n{question}")
+                print(f"Prediction: \n{pred}")
+                print(f"Ground Truth: \n{answer_gt}")
+            else:
+                # OCR: exact match + CER
+                if pred.strip().lower() == answer_gt.strip().lower():
+                    correct += 1
+                # Simple character error rate
+                max_len = max(len(pred), len(answer_gt), 1)
+                errors = sum(1 for a, b in zip(pred, answer_gt) if a != b) + abs(len(pred) - len(answer_gt))
+                cer_sum += errors / max_len
+
+            total += 1
+
+        except Exception as e:
+            logger.warning(f"Validation error at idx {idx}: {e}")
+            continue
+
+    model.train()
+
+    metrics = {}
+    if total > 0:
+        metrics["val_accuracy"] = correct / total
+        if task == "counting":
+            metrics["val_mad"] = mad_sum / total
+        else:
+            metrics["val_cer"] = cer_sum / total
+    else:
+        metrics["val_accuracy"] = 0.0
+
+    return metrics
+
+
+def _save_lora_ckpt_no_fsdp(ckpt_dir, train_steps, model, optimizer, scheduler, data_status, logger, save_name=None):
+    """Save LoRA checkpoint without FSDP (for LoRA training, with or without DDP)."""
+    from safetensors.torch import save_file
+    # Unwrap DDP if needed
+    raw_model = model.module if hasattr(model, 'module') else model
+    if save_name is None:
+        save_name = f"step{train_steps}"
+    save_path = os.path.join(ckpt_dir, save_name)
+    os.makedirs(save_path, exist_ok=True)
+    logger.info(f"Saving LoRA checkpoint to {save_path}")
+    # Save LoRA adapter
+    lora_state = {k: v.cpu() for k, v in raw_model.state_dict().items() if "lora_" in k or "modules_to_save" in k}
+    save_file(lora_state, os.path.join(save_path, "adapter_model.safetensors"))
+    if hasattr(raw_model, 'peft_config'):
+        for _, cfg in raw_model.peft_config.items():
+            cfg.save_pretrained(save_path)
+            break
+    logger.info(f"Saved LoRA adapter ({len(lora_state)} tensors) to {save_path}")
+    # Save optimizer, scheduler, data_status
+    torch.save(optimizer.state_dict(), os.path.join(save_path, "optimizer.00000-of-00001.pt"))
+    if scheduler is not None:
+        torch.save(scheduler.state_dict(), os.path.join(save_path, "scheduler.pt"))
+    if data_status is not None:
+        torch.save(data_status, os.path.join(save_path, "data_status.pt"))
+
+
+def _do_checkpoint_save(
+    training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
+    data_status, fsdp_config, curr_step, logger, save_name=None,
+):
+    """Gather data_status across ranks, save checkpoint, and cleanup CUDA cache."""
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    if dist.get_rank() == 0:
+        gather_list = [None] * dist.get_world_size()
+    else:
+        gather_list = None
+    try:
+        dist.gather_object(data_status, gather_list, dst=0)
+    except RuntimeError as e:
+        logger.error(f"Error during gather_object at step {curr_step}: {e}")
+        gather_list = None if dist.get_rank() != 0 else [data_status] * dist.get_world_size()
+
+    if skip_fsdp:
+        if dist.get_rank() == 0:
+            _save_lora_ckpt_no_fsdp(
+                training_args.checkpoint_dir, curr_step, fsdp_model,
+                optimizer, scheduler, gather_list, logger, save_name=save_name,
+            )
+        if dist.get_world_size() > 1:
+            dist.barrier()
+    else:
+        FSDPCheckpoint.fsdp_save_ckpt(
+            ckpt_dir=training_args.checkpoint_dir, train_steps=curr_step,
+            model=fsdp_model, ema_model=None, optimizer=optimizer,
+            scheduler=scheduler, logger=logger, fsdp_config=fsdp_config,
+            data_status=gather_list, use_lora=training_args.use_lora, save_name=save_name,
+        )
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 def main():
@@ -422,11 +891,24 @@ def main():
         os.makedirs(training_args.results_dir, exist_ok=True)
         os.makedirs(training_args.checkpoint_dir, exist_ok=True)
         logger = create_logger(training_args.results_dir, dist.get_rank())
+
+        print(
+        '''
+        # ---------------------------------------------------------------------------- #
+        #                                 WANDB STATUS                                 #
+        # ---------------------------------------------------------------------------- #
+        '''
+        )
+        print(f"W&B Project: {training_args.wandb_project}")
+        print(f"W&B Run Name: {training_args.wandb_name}")
+        print(f"W&B Run ID: {training_args.wandb_runid}")
+        print(f"W&B Resume: {training_args.wandb_resume}")
+        print(f"W&B Offline: {training_args.wandb_offline}")
         wandb.init(
             project=training_args.wandb_project, 
-            id=f"{training_args.wandb_name}-run{training_args.wandb_runid}", 
             name=training_args.wandb_name, 
             resume=training_args.wandb_resume,
+            id=training_args.wandb_runid if training_args.wandb_resume in ["must", "allow"] else None, # Only set ID if resuming, to avoid accidentally resuming when you meant to start fresh
             mode="offline" if training_args.wandb_offline else "online",
             settings=wandb.Settings(init_timeout=120)
         )
@@ -470,38 +952,40 @@ def main():
     set_seed(seed)
 
     # Setup model:
-    if training_args.finetune_from_hf:
-        llm_config = Qwen2Config.from_json_file(os.path.join(model_args.model_path, "llm_config.json"))
-    else:
-        llm_config = Qwen2Config.from_pretrained(model_args.llm_path)
-    llm_config.layer_module = model_args.layer_module
-    llm_config.qk_norm = model_args.llm_qk_norm
-    llm_config.tie_word_embeddings = model_args.tie_word_embeddings
-    llm_config.freeze_und = training_args.freeze_und
-    if training_args.finetune_from_hf:
-        language_model = Qwen2ForCausalLM(llm_config)
-    else:
-        language_model = Qwen2ForCausalLM.from_pretrained(model_args.llm_path, config=llm_config)
-    if training_args.copy_init_moe:
-        language_model.init_moe()
+    with init_empty_weights():
+        if training_args.finetune_from_hf:
+            llm_config = Qwen2Config.from_json_file(os.path.join(model_args.model_path, "llm_config.json"))
+        else:
+            llm_config = Qwen2Config.from_pretrained(model_args.llm_path)
+        llm_config.layer_module = model_args.layer_module
+        llm_config.qk_norm = model_args.llm_qk_norm
+        llm_config.tie_word_embeddings = model_args.tie_word_embeddings
+        llm_config.freeze_und = training_args.freeze_und
+        if training_args.finetune_from_hf:
+            language_model = Qwen2ForCausalLM(llm_config)
+        else:
+            language_model = Qwen2ForCausalLM.from_pretrained(model_args.llm_path, config=llm_config)
+        if training_args.copy_init_moe:
+            language_model.init_moe()
 
-    if training_args.visual_und:  
-        if training_args.finetune_from_hf:
-            vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_args.model_path, "vit_config.json"))
-        else:
-            vit_config = SiglipVisionConfig.from_pretrained(model_args.vit_path)
-        vit_config.num_hidden_layers = vit_config.num_hidden_layers + 1 + model_args.vit_select_layer
-        vit_config.rope = model_args.vit_rope
-        if training_args.finetune_from_hf:
-            vit_model = SiglipVisionModel(vit_config)
-        else:
-            vit_model = SiglipVisionModel.from_pretrained(model_args.vit_path, config=vit_config)
+        if training_args.visual_und:  
+            if training_args.finetune_from_hf:
+                vit_config = SiglipVisionConfig.from_json_file(os.path.join(model_args.model_path, "vit_config.json"))
+            else:
+                vit_config = SiglipVisionConfig.from_pretrained(model_args.vit_path)
+            vit_config.num_hidden_layers = vit_config.num_hidden_layers + 1 + model_args.vit_select_layer
+            vit_config.rope = model_args.vit_rope
+            if training_args.finetune_from_hf:
+                vit_model = SiglipVisionModel(vit_config)
+            else:
+                vit_model = SiglipVisionModel.from_pretrained(model_args.vit_path, config=vit_config)
 
     if training_args.visual_gen:
         vae_model, vae_config = load_ae(
             local_path=os.path.join(model_args.model_path, "ae.safetensors") 
             if training_args.finetune_from_hf else model_args.vae_path
         )
+        vae_model = vae_model.to(torch.bfloat16).to(device)
 
     config = BagelConfig(
         visual_gen=training_args.visual_gen,
@@ -521,9 +1005,16 @@ def main():
         vit_model if training_args.visual_und else None, 
         config
     )
-
     if training_args.visual_und:
-        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config)
+        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
+    
+    if training_args.finetune_from_hf:
+        # safetensors에서 GPU로 직접 로드
+        from safetensors.torch import load_file
+        state_dict = load_file(os.path.join(model_args.model_path, "ema.safetensors"), device=device)
+        # assign=True가 핵심 — meta tensor를 실제 tensor로 "교체
+        model.load_state_dict(state_dict, strict=False, assign=True)
+
 
     total_param_count = count_parameters(model)
     lm_param_count = count_parameters(model.language_model)
@@ -550,6 +1041,44 @@ def main():
         for param in model.vit_model.parameters():
             param.requires_grad = False
 
+    # --- LoRA Injection (before FSDP wrap) ---
+    if training_args.use_lora:
+        if training_args.freeze_llm:
+            raise ValueError("Cannot use --use_lora with --freeze_llm; LoRA freezes base params itself.")
+
+        from peft import LoraConfig, get_peft_model, PeftModel
+
+        # Freeze all base parameters; LoRA will add trainable adapters
+        for param in model.parameters():
+            param.requires_grad = False
+
+        target_modules = [m.strip() for m in training_args.lora_target_modules.split(",")]
+
+        if training_args.lora_ckpt_path is not None:
+            # Resume from a saved LoRA adapter
+            logger.info(f"Loading LoRA adapter from {training_args.lora_ckpt_path}")
+            model = PeftModel.from_pretrained(
+                model, training_args.lora_ckpt_path,
+                is_trainable=True, torch_device="cpu",
+            )
+        else:
+            logger.info(f"Applying LoRA: rank={training_args.lora_rank}, alpha={training_args.lora_alpha}, "
+                        f"dropout={training_args.lora_dropout}, targets={target_modules}")
+            # Exclude gen branch (moe_gen) from LoRA when training understanding only
+            lora_exclude = ".*moe_gen.*" if data_args.mode == "und" else None
+
+            lora_config = LoraConfig(
+                r=training_args.lora_rank,
+                lora_alpha=training_args.lora_alpha,
+                target_modules=target_modules,
+                exclude_modules=lora_exclude,
+                lora_dropout=training_args.lora_dropout,
+                bias="none",
+            )
+            model = get_peft_model(model, lora_config)
+
+        model.print_trainable_parameters()
+
     # Setup FSDP and load pretrained model:
     fsdp_config = FSDPConfig(
         sharding_strategy=training_args.sharding_strategy,
@@ -558,19 +1087,41 @@ def main():
         num_replicate=training_args.num_replicate,
         num_shard=training_args.num_shard,
     )
-    ema_model = deepcopy(model)
-    model, ema_model = FSDPCheckpoint.try_load_ckpt(
-        resume_from, logger, model, ema_model, resume_from_ema=finetune_from_ema
-    )
-    ema_model = fsdp_ema_setup(ema_model, fsdp_config)
-    fsdp_model = fsdp_wrapper(model, fsdp_config)
-    apply_activation_checkpointing(
-        fsdp_model, 
-        checkpoint_wrapper_fn=functools.partial(
-            checkpoint_wrapper, checkpoint_impl=CheckpointImpl.NO_REENTRANT
-        ), 
-        check_fn=grad_checkpoint_check_fn
-    )
+    # Skip base-model checkpoint load when resuming from LoRA adapter
+    # (PeftModel.from_pretrained already loaded base + adapter)
+    if not (training_args.use_lora and training_args.lora_ckpt_path is not None):
+        model, _ = FSDPCheckpoint.try_load_ckpt(
+            resume_from, logger, model, ema_model=None, resume_from_ema=finetune_from_ema
+        )
+    model = model.to(torch.bfloat16)
+
+    # 1-GPU LoRA: skip FSDP to avoid full-model gradient buffers
+    skip_fsdp = training_args.use_lora 
+
+    if skip_fsdp:
+        model = model.to(device)
+        apply_activation_checkpointing(
+            model,
+            checkpoint_wrapper_fn=functools.partial(
+                checkpoint_wrapper, checkpoint_impl=CheckpointImpl.NO_REENTRANT
+            ),
+            check_fn=grad_checkpoint_check_fn
+        )
+        if dist.get_world_size() > 1:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            fsdp_model = DDP(model, device_ids=[device])
+            logger.info(f"Wrapped LoRA model in DDP for {dist.get_world_size()}-GPU gradient sync")
+        else:
+            fsdp_model = model
+    else:
+        fsdp_model = fsdp_wrapper(model, fsdp_config, use_lora=training_args.use_lora)
+        apply_activation_checkpointing(
+            fsdp_model,
+            checkpoint_wrapper_fn=functools.partial(
+                checkpoint_wrapper, checkpoint_impl=CheckpointImpl.NO_REENTRANT
+            ),
+            check_fn=grad_checkpoint_check_fn
+        )
 
     if dist.get_rank() == 0:
         print(fsdp_model)
@@ -578,13 +1129,36 @@ def main():
             print(name, param.requires_grad)
 
     # Setup optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        fsdp_model.parameters(), 
-        lr=training_args.lr, 
-        betas=(training_args.beta1, training_args.beta2), 
-        eps=training_args.eps, 
-        weight_decay=0
-    )
+    # LoRA + 8-bit AdamW: override dangerously small eps (1e-15) to prevent
+    # numerical instability from quantized second moments hitting zero.
+    opt_eps = training_args.eps
+    if training_args.use_lora and opt_eps < 1e-8:
+        logger.warning(f"LoRA + 8-bit AdamW: overriding eps={opt_eps} → 1e-8 for numerical stability")
+        opt_eps = 1e-8
+
+    # bitsandbytes 8-bit AdamW requires all tensors on GPU;
+    # fall back to standard AdamW when FSDP cpu_offload is enabled.
+    if training_args.cpu_offload:
+        optimizer = torch.optim.AdamW(
+            fsdp_model.parameters(),
+            lr=training_args.lr,
+            betas=(training_args.beta1, training_args.beta2),
+            eps=opt_eps,
+            weight_decay=0
+        )
+    else:
+        optimizer = bnb.optim.AdamW8bit(
+            fsdp_model.parameters(),
+            lr=training_args.lr,
+            betas=(training_args.beta1, training_args.beta2),
+            eps=opt_eps,
+            weight_decay=0
+        )
+    # LoRA: auto-add warmup to avoid full-lr cold start instability
+    if training_args.use_lora and training_args.warmup_steps == 0:
+        training_args.warmup_steps = 200
+        logger.warning(f"LoRA training: auto-setting warmup_steps=200 for stability")
+
     if training_args.lr_scheduler == 'cosine':
         scheduler = get_cosine_with_min_lr_schedule_with_warmup(
             optimizer=optimizer,
@@ -607,10 +1181,19 @@ def main():
         optimizer, scheduler, train_step, data_status = FSDPCheckpoint.try_load_train_state(
             resume_from, optimizer, scheduler, fsdp_config, 
         )
+        
 
     # Setup packed dataloader
-    with open(data_args.dataset_config_file, "r") as stream:
-        dataset_meta = yaml.safe_load(stream)
+    if data_args.task is not None:
+        # Dynamic config from --task / --mode
+        dataset_meta = build_task_dataset_meta(
+            data_args.task, data_args.mode, data_args.hf_dataset_path
+        )
+        logger.info(f"Built dataset config for task={data_args.task}, mode={data_args.mode}: "
+                     f"{list(dataset_meta.keys())}")
+    else:
+        with open(data_args.dataset_config_file, "r") as stream:
+            dataset_meta = yaml.safe_load(stream)
     dataset_config = DataConfig(grouped_datasets=dataset_meta)
     if training_args.visual_und:
         dataset_config.vit_patch_size = model_args.vit_patch_size
@@ -649,14 +1232,88 @@ def main():
         prefetch_factor=data_args.prefetch_factor,
     )
 
+    total_dataset_samples = train_dataset.total_samples
+    if total_dataset_samples and dist.get_rank() == 0:
+        logger.info(f"Total dataset samples (1 epoch): {total_dataset_samples}")
+
+    # Load validation dataset (only on rank 0 since validation runs there)
+    val_ds = None
+    val_image_transform = None
+    if (data_args.task is not None
+        and (data_args.validation_interval > 0 or data_args.eval_before_training)
+        and (data_args.mode in ("und", "both") or data_args.eval_everything)
+        and dist.get_rank() == 0):
+        from data.transforms import ImageTransform
+        val_ds = _load_validation_dataset(
+            data_args.task, 'und', data_args.hf_dataset_path, data_args.validation_samples
+        )
+        val_image_transform = ImageTransform(
+            max_image_size=980, min_image_size=378, image_stride=14, max_pixels=2_007_040
+        )
+        logger.info(f"Loaded validation dataset: {len(val_ds)} samples for task={data_args.task}")
+
+    # Load generation validation prompts (only on rank 0)
+    val_gen_prompts = None
+    if (data_args.task is not None
+        and (data_args.validation_interval > 0 or data_args.eval_before_training)
+        and (data_args.mode in ("gen", "both") or data_args.eval_everything)
+        and training_args.visual_gen
+        and dist.get_rank() == 0):
+        # Use the same val_ds if already loaded, otherwise load it
+        _gen_val_ds = _load_validation_dataset(
+            data_args.task, 'gen', data_args.hf_dataset_path, data_args.validation_samples
+        )
+        if _gen_val_ds is not None:
+            val_gen_prompts = _setup_val_gen_prompts(
+                _gen_val_ds, data_args.task, num_prompts=data_args.val_gen_num_images
+            )
+            logger.info(f"Loaded {len(val_gen_prompts)} generation validation prompts")
+            for i, p in enumerate(val_gen_prompts):
+                logger.info(f"  {i+1}. {p}")
+
     # Prepare models for training:
     if training_args.visual_gen:
         vae_model.to(device).eval()
     fsdp_model.train()
-    ema_model.eval()
+
+    # # eval before training
+    # if val_ds is not None and data_args.eval_before_training:
+    #     if dist.get_rank() == 0:
+    #         logger.info("Running validation before training (step 0)...")
+    #         val_metrics = validate_understanding(
+    #             model=fsdp_model, tokenizer=tokenizer,
+    #             new_token_ids=new_token_ids, image_transform=val_image_transform,
+    #             val_ds=val_ds, task=data_args.task, device=device, logger=logger,
+    #         )
+    #         val_message = "(step=0000000) Validation [before training]: "
+    #         for k, v in val_metrics.items():
+    #             val_message += f"{k}={v:.4f} "
+    #         logger.info(val_message)
+    #         print(val_message, flush=True)
+    #         wandb.log(val_metrics, step=train_step)
+    #         fsdp_model.train()
+    #     if dist.get_world_size() > 1:
+    #         dist.barrier()
+
+    # # eval before training - generation
+    # if val_gen_prompts is not None and data_args.eval_before_training:
+    #     if dist.get_rank() == 0:
+    #         logger.info("Running generation validation before training (step 0)...")
+    #         gen_metrics = validate_generation(
+    #             model=fsdp_model, vae_model=vae_model,
+    #             tokenizer=tokenizer, new_token_ids=new_token_ids,
+    #             prompts=val_gen_prompts, resolution=data_args.val_gen_resolution,
+    #             device=device, logger=logger,
+    #         )
+    #         wandb.log(gen_metrics, step=train_step)
+    #         fsdp_model.train()
+    #     if dist.get_world_size() > 1:
+    #         dist.barrier()
 
     # train loop
     start_time = time()
+    cumulative_samples = 0
+    last_saved_epoch = -1
     logger.info(f"Training for {training_args.total_steps} steps, starting at {train_step}...")
     optimizer.zero_grad()
     total_norm = torch.tensor(0.0, device=device)
@@ -669,6 +1326,7 @@ def main():
             logger.info(f"Reached total_steps={training_args.total_steps}, stopping training.")
             break
         data = data.cuda(device).to_dict()
+        cumulative_samples += len(data['sample_lens'])
         data_indexes = data.pop('batch_data_indexes', None)
         ce_loss_weights = data.pop('ce_loss_weights', None)       
         tokens_tensor = torch.tensor(float(data['sequence_length']), device=device)
@@ -681,7 +1339,7 @@ def main():
             seqlen_square_window += sample_square.item()
 
         with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-            if training_args.visual_gen:
+            if training_args.visual_gen and 'padded_images' in data:
                 with torch.no_grad():
                     data['padded_latent'] = vae_model.encode(data.pop('padded_images'))
             try:
@@ -694,7 +1352,7 @@ def main():
         
         loss = 0
         ce = loss_dict["ce"]
-        if ce is not None:
+        if ce is not None: # 
             total_ce_tokens = torch.tensor(len(data['ce_loss_indexes']), device=device)
             dist.all_reduce(total_ce_tokens, op=dist.ReduceOp.SUM)
             if training_args.ce_loss_reweighting:
@@ -707,11 +1365,10 @@ def main():
             loss_dict["ce"] = ce.detach()
             loss = loss + ce * training_args.ce_weight
         else:
-            assert not training_args.visual_und
             loss_dict["ce"] = torch.tensor(0, device=device)
             total_ce_tokens = torch.tensor(0, device=device)
 
-        if training_args.visual_gen:
+        if training_args.visual_gen and loss_dict["mse"] is not None:
             mse = loss_dict["mse"]
             total_mse_tokens = torch.tensor(len(data['mse_loss_indexes']), device=device)
             dist.all_reduce(total_mse_tokens, op=dist.ReduceOp.SUM)
@@ -719,7 +1376,6 @@ def main():
             loss_dict["mse"] = mse.detach()
             loss = loss + mse * training_args.mse_weight
         else:
-            assert not training_args.visual_gen
             loss_dict["mse"] = torch.tensor(0, device=device)
             total_mse_tokens = torch.tensor(0, device=device)
 
@@ -727,10 +1383,15 @@ def main():
         loss.backward()
 
         if (micro_step + 1) % training_args.gradient_accumulation_steps == 0:
-            total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
+            if skip_fsdp:
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in fsdp_model.parameters() if p.requires_grad],
+                    training_args.max_grad_norm,
+                )
+            else:
+                total_norm = fsdp_model.clip_grad_norm_(training_args.max_grad_norm)
             optimizer.step()
             scheduler.step()
-            fsdp_ema_update(ema_model, fsdp_model, decay=training_args.ema)
             optimizer.zero_grad()
         
         # Log loss values:
@@ -759,26 +1420,31 @@ def main():
                 message += f"Train Loss {key}: {avg_loss:.4f}, "
                 wandb_log[key] = avg_loss
             message += f"Train Steps/Sec: {steps_per_sec:.2f}, Tokens/Sec: {tokens_per_sec/1000:.2f}k, MFU: {mfu_value*100:.1f}%, "
+            if total_dataset_samples:
+                current_epoch = cumulative_samples * dist.get_world_size() / total_dataset_samples
+                message += f"Epoch: {current_epoch:.3f}, "
             logger.info(message)
             if dist.get_rank() == 0:
                 print(message, flush=True)
 
-            wandb_log['lr'] = optimizer.param_groups[0]['lr']
-            wandb_log['total_mse_tokens'] = total_mse_tokens.item()
-            wandb_log['total_ce_tokens'] = total_ce_tokens.item()
-            wandb_log['total_norm'] = total_norm.item()
-            wandb_log['total_samples'] = total_samples.item()
-            wandb_log['tokens_per_sec'] = tokens_per_sec
-            wandb_log['tokens_per_step'] = tokens_per_step
-            wandb_log['actual_tflops'] = actual_tflops
-            wandb_log['mfu'] = mfu_value
+            wandb_log['train_lr'] = optimizer.param_groups[0]['lr']
+            wandb_log['train_total_mse_tokens'] = total_mse_tokens.item()
+            wandb_log['train_total_ce_tokens'] = total_ce_tokens.item()
+            wandb_log['train_total_norm'] = total_norm.item()
+            wandb_log['train_total_samples'] = total_samples.item()
+            wandb_log['train_tokens_per_sec'] = tokens_per_sec
+            wandb_log['train_tokens_per_step'] = tokens_per_step
+            wandb_log['train_actual_tflops'] = actual_tflops
+            wandb_log['train_mfu'] = mfu_value
 
             mem_allocated = torch.tensor(torch.cuda.max_memory_allocated() / 1024**2, device=device)
             dist.all_reduce(mem_allocated, op=dist.ReduceOp.MAX)
-            wandb_log['mem_allocated'] = mem_allocated
+            wandb_log['train_mem_allocated'] = mem_allocated
             mem_cache = torch.tensor(torch.cuda.max_memory_reserved() / 1024**2, device=device)
             dist.all_reduce(mem_cache, op=dist.ReduceOp.MAX)
-            wandb_log['mem_cache'] = mem_cache
+            wandb_log['train_mem_cache'] = mem_cache
+            if total_dataset_samples:
+                wandb_log['train_epoch'] = current_epoch
 
             if dist.get_rank() == 0:
                 wandb.log(wandb_log, step=curr_step)
@@ -793,77 +1459,84 @@ def main():
                 data_status[item['dataset_name']] = {}
             data_status[item['dataset_name']][item['worker_id']] = item['data_indexes']
 
-        if curr_step > 0 and curr_step % training_args.save_every == 0:
-            # Clear caches and ensure all CUDA operations complete before checkpoint
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        # Inline validation
+        is_val_step = (data_args.validation_interval > 0
+            and curr_step > 0
+            and curr_step % data_args.validation_interval == 0
+            and (micro_step + 1) % training_args.gradient_accumulation_steps == 0)
+
+        if is_val_step and val_ds is not None:
             if dist.get_rank() == 0:
-                gather_list = [None] * dist.get_world_size()
-            else:
-                gather_list = None
-            try:
-                dist.gather_object(data_status, gather_list, dst=0)
-            except RuntimeError as e:
-                logger.error(f"Error during gather_object at step {curr_step}: {e}")
-                gather_list = None if dist.get_rank() != 0 else [data_status] * dist.get_world_size()
+                logger.info(f"Running validation at step {curr_step}...")
+                val_metrics = validate_understanding(
+                    model=fsdp_model,
+                    tokenizer=tokenizer,
+                    new_token_ids=new_token_ids,
+                    image_transform=val_image_transform,
+                    val_ds=val_ds,
+                    task=data_args.task,
+                    device=device,
+                    logger=logger,
+                )
+                val_message = f"(step={curr_step:07d}) Validation: "
+                for k, v in val_metrics.items():
+                    val_message += f"{k}={v:.4f} "
+                logger.info(val_message)
+                print(val_message, flush=True)
+                wandb.log(val_metrics, step=curr_step)
+                fsdp_model.train()
+            if dist.get_world_size() > 1:
+                dist.barrier()
 
-            FSDPCheckpoint.fsdp_save_ckpt(
-                ckpt_dir=training_args.checkpoint_dir, 
-                train_steps=curr_step, 
-                model=fsdp_model, 
-                ema_model=ema_model, 
-                optimizer=optimizer, 
-                scheduler=scheduler, 
-                logger=logger,
-                fsdp_config=fsdp_config,
-                data_status=gather_list
+        # Inline generation validation
+        if is_val_step and val_gen_prompts is not None:
+            if dist.get_rank() == 0:
+                logger.info(f"Running generation validation at step {curr_step}...")
+                gen_metrics = validate_generation(
+                    model=fsdp_model, vae_model=vae_model,
+                    tokenizer=tokenizer, new_token_ids=new_token_ids,
+                    prompts=val_gen_prompts, resolution=data_args.val_gen_resolution,
+                    device=device, logger=logger,
+                )
+                if gen_metrics:
+                    wandb.log(gen_metrics, step=curr_step)
+                fsdp_model.train()
+            if dist.get_world_size() > 1:
+                dist.barrier()
+
+        # Epoch-based checkpoint save
+        if total_dataset_samples:
+            current_epoch_for_save = cumulative_samples * dist.get_world_size() / total_dataset_samples
+            completed_epoch = int(current_epoch_for_save)
+            if completed_epoch > last_saved_epoch and completed_epoch > 0:
+                last_saved_epoch = completed_epoch
+                logger.info(f"Epoch {completed_epoch} completed at step {curr_step}, saving checkpoint...")
+                _do_checkpoint_save(
+                    training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
+                    data_status, fsdp_config, curr_step, logger,
+                    save_name=f"epoch{completed_epoch}",
+                )
+
+        # Step-based checkpoint save
+        if curr_step > 0 and curr_step % training_args.save_every == 0:
+            epoch_int = int(cumulative_samples * dist.get_world_size() / total_dataset_samples) if total_dataset_samples else 0
+            save_name = f"epoch{epoch_int}-step{curr_step}"
+            _do_checkpoint_save(
+                training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
+                data_status, fsdp_config, curr_step, logger,
+                save_name=save_name,
             )
-            # Clear CUDA cache and force garbage collection after checkpoint to free memory
-            gc.collect()
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
 
-            # comment out as an alternative to save the ema model in pt format
-            # ema_state_dict = {}
-            # for name, param in ema_model.named_parameters():
-            #     ema_state_dict[name] = param.detach().cpu()
-            
-            # torch.save(
-            #     ema_state_dict, 
-            #     os.path.join(training_args.checkpoint_dir, f"{curr_step:07d}", "ema_standard.pt")
-            # )
-    
     # Save final checkpoint if not already saved
     if curr_step > 0:
         logger.info(f"Saving final checkpoint at step {curr_step}...")
-        # Clear caches and ensure all CUDA operations complete before final checkpoint
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        if dist.get_rank() == 0:
-            gather_list = [None] * dist.get_world_size()
-        else:
-            gather_list = None
-        try:
-            dist.gather_object(data_status, gather_list, dst=0)
-        except RuntimeError as e:
-            logger.error(f"Error during final gather_object: {e}")
-            gather_list = None if dist.get_rank() != 0 else [data_status] * dist.get_world_size()
-        
-        FSDPCheckpoint.fsdp_save_ckpt(
-            ckpt_dir=training_args.checkpoint_dir, 
-            train_steps=curr_step, 
-            model=fsdp_model, 
-            ema_model=ema_model, 
-            optimizer=optimizer, 
-            scheduler=scheduler, 
-            logger=logger,
-            fsdp_config=fsdp_config,
-            data_status=gather_list
+        epoch_int = int(cumulative_samples * dist.get_world_size() / total_dataset_samples) if total_dataset_samples else 0
+        save_name = f"epoch{epoch_int}-step{curr_step}"
+        _do_checkpoint_save(
+            training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
+            data_status, fsdp_config, curr_step, logger,
+            save_name=save_name,
         )
-        # Clear CUDA cache and force garbage collection after final checkpoint
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
         logger.info(f"Final checkpoint saved at step {curr_step}")
     
     logger.info("Done!")

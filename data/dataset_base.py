@@ -154,6 +154,15 @@ class PackedDataset(torch.utils.data.IterableDataset):
 
         return datasets, is_mandatory, grouped_weights
 
+    @property
+    def total_samples(self):
+        """Total number of samples across all grouped HF datasets."""
+        total = 0
+        for ds in self.grouped_datasets:
+            if hasattr(ds, 'hf_dataset'):
+                total += len(ds.hf_dataset)
+        return total if total > 0 else None
+
     def set_epoch(self, seed):
         for dataset in self.grouped_datasets:
             dataset.set_epoch(seed)
@@ -260,7 +269,8 @@ class PackedDataset(torch.utils.data.IterableDataset):
                             else:
                                 print(f"skip a sample with length {num_tokens}")
                                 continue
-
+            
+            # 다음 샘플이 버퍼에서 나올지, 그룹에서 나올지 결정
             if sequence_status['curr'] < self.prefer_buffer_before and len(buffer) > 0:
                 sample = buffer.pop(0)
                 sample_from_buffer = True
@@ -276,29 +286,39 @@ class PackedDataset(torch.utils.data.IterableDataset):
                 sample_from_buffer = False
 
             # if a sample is too long, skip it
+            # note that, depending on the sequence plan, a sample may require up to 2 special tokens per item in the sequence plan (e.g., <|startofimage|> and <|endofimage|> for an image item), so we need to take that into account when calculating the number of tokens in the sample.
             num_tokens = sample['num_tokens'] + 2 * len(sample['sequence_plan'])
             if num_tokens > self.max_num_tokens_per_sample:
                 print(f"skip a sample with length {num_tokens}")
                 continue
-
+            
+            # 해당 sample을 현재 sequence에 추가했을 때 max_num_tokens를 초과한다면
+            # print(f"Current sequence length: {sequence_status['curr']} | Next sample length (with special tokens): {num_tokens} | Sum : {sequence_status['curr'] + num_tokens} | Max allowed tokens: {self.max_num_tokens}")
             if sequence_status['curr'] + num_tokens > self.max_num_tokens:
+                # print(f"Sequence length {sequence_status['curr'] + num_tokens} exceeds max_num_tokens {self.max_num_tokens}")
+                # 버퍼에 공간이 있으면, 버퍼에 삽입, 
                 if len(buffer) < self.max_buffer_size and not sample_from_buffer:
                     buffer.append(sample)
+                    # print(f"Buffer: Sampled added | length {num_tokens}. Current buffer size: {len(buffer)}")
+                # 버퍼에 공간이 없다면, 현재까지 패킹된 시퀀스를 반환
                 else:
-                    print(f"Yielding data with length {sum(sequence_status['sample_lens'])}")
+                    # print(f"Buffer is full: Yielding data with length {sum(sequence_status['sample_lens'])}")
                     data = self.to_tensor(sequence_status)
                     data['batch_data_indexes'] = batch_data_indexes
                     yield data
                     sequence_status = self.set_sequence_status()
                     batch_data_indexes = []
                 continue
-
+            
+            # 초과하지 않는다면, 시퀀스에 샘플 추가
             sequence_status = self.pack_sequence(sample, sequence_status)
             batch_data_indexes.append(sample['data_indexes'])
 
             if sequence_status['curr'] >= self.expected_num_tokens:
                 data = self.to_tensor(sequence_status)
                 data['batch_data_indexes'] = batch_data_indexes
+                num_tokens = data['sequence_length']
+                # print(f"Yielding data with length {num_tokens}")
                 yield data
                 sequence_status = self.set_sequence_status()
                 batch_data_indexes = []

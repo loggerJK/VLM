@@ -266,7 +266,7 @@ class Qwen2Tokenizer(PreTrainedTokenizer):
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer._convert_id_to_token
     def _convert_id_to_token(self, index):
         """Converts an index (integer) in a token (str) using the vocab."""
-        return self.decoder.get(index)
+        return self.decoder.get(index, "")
 
     # Copied from transformers.models.gpt2.tokenization_gpt2.GPT2Tokenizer.convert_tokens_to_string
     def convert_tokens_to_string(self, tokens):
