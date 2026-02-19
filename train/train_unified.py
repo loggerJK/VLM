@@ -402,6 +402,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout")
 
         # Training Arguments
+        parser.add_argument("--use_compile", action="store_true", help="Enable torch.compile for training speedup")
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
@@ -498,7 +499,7 @@ class Solver(FinetuneSolverBase):
 
     def __init__(self, args):
         super().__init__(args)
-
+        
         # Pre-download NLTK data and metrics for OCR task
         if self.args.task in ['ocr', 'ocr_synthetic']:
             if self.global_rank == 0:
@@ -667,9 +668,14 @@ class Solver(FinetuneSolverBase):
                 check_fn=check_fn,
             )
 
+        # 6. torch.compile
+        if self.args.use_compile:
+            print("[Solver] Applying torch.compile (dynamic=True)...")
+            model = torch.compile(model, dynamic=True)
+
         self.logger.info(f"Wrapped model: \n{str(model)}")
 
-        # 6. Optimizer
+        # 7. Optimizer
         try:
             import bitsandbytes as bnb
             print("[Solver] Using bitsandbytes.optim.AdamW8bit Optimizer...")
@@ -1434,7 +1440,7 @@ class Solver(FinetuneSolverBase):
             input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
             code_start = len(input_token) + 1
             STEPS_LENGTH = 128
-            GEN_LENGTH = 512
+            GEN_LENGTH = 512 if self.args.task == 'ocr' else 128
             BLOCK_LENGTH = 128
             input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
             input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
@@ -1561,7 +1567,7 @@ class Solver(FinetuneSolverBase):
 
         if run_und and self.args.wandb_run_id is None:
             if self.args.task in ['ocr', 'ocr_synthetic']:
-                self.validate_ocr(self.start_epoch)
+                # self.validate_ocr(self.start_epoch)
                 pass
             else:
                 self.validate(self.start_epoch, format="counting", split="train")
@@ -1573,7 +1579,7 @@ class Solver(FinetuneSolverBase):
         if run_gen and self.args.wandb_run_id is None:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
-            self.log_validation_images(self.global_step)
+            # self.log_validation_images(self.global_step)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()

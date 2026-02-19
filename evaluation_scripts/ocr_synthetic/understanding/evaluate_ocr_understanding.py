@@ -4,7 +4,7 @@ OCR Understanding Evaluation Script (Multi-GPU)
 
 Evaluates model's ability to read text from images.
 Flow: image -> model generates text -> compare with GT answer
-Dataset: Jiwon-Kang/Llama-Nemotron-VLM-Dataset-v1-OCR4 (validation split)
+Dataset: agentlans/high-quality-english-sentences (test split)
 
 Supports single-GPU (python) and multi-GPU (torchrun) execution.
 Supports resume: each rank writes results to a per-rank JSONL file.
@@ -55,7 +55,7 @@ EOI = SPECIAL_TOKENS["eoi"]
 UNDERSTANDING_PROMPT_TEMPLATE = PROMPT_TEMPLATES["text_understanding"]
 
 torch.set_grad_enabled(False)
-
+from copy import deepcopy
 
 def load_done_indices(jsonl_path):
     """Load set of already-processed indices from a JSONL file."""
@@ -177,7 +177,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="LoRA checkpoint path")
     parser.add_argument("--num_samples", type=int, default=1000, help="Number of samples (None=all)")
-    parser.add_argument("--dataset_path", type=str, default="Abirate/english_quotes")
+    parser.add_argument("--dataset_path", type=str, default="agentlans/high-quality-english-sentences")
+    parser.add_argument("--give_first_token", action="store_true", help="Whether to give the first token of the answer")
     args = parser.parse_args()
 
     # Initialize Distributed
@@ -211,9 +212,9 @@ def main():
 
     # Load Dataset (streaming)
     print(f"[Rank {rank}] Loading dataset: {args.dataset_path}...")
-    dataset = load_dataset(args.dataset_path, split="train", streaming=False)
+    dataset = load_dataset(args.dataset_path, split="test", streaming=False)
     # Select Samples
-    dataset = dataset.select(list(range(len(dataset) - world_size * 3, len(dataset))))
+    dataset = dataset.select(list(range(0, min(args.num_samples, len(dataset)))))
     args.num_samples = min(args.num_samples, len(dataset)) if args.num_samples else len(dataset)
 
     # Load Models
@@ -239,16 +240,16 @@ def main():
 
     # Eval loop
     print(f"[Rank {rank}] Starting OCR understanding evaluation...")
-    processed = 0
+    # Pre-compute local indices for this rank (handles remainder correctly)
+    local_indices = list(range(rank, args.num_samples, world_size))
+    local_indices_set = set(local_indices)
+
     for i, item in tqdm(enumerate(dataset), total=args.num_samples, desc=f"Rank {rank}"):
-        if i % world_size != rank:
+        if i not in local_indices_set:
             continue
 
         # Resume: skip already-processed indices
         if i in done_indices:
-            processed += 1
-            if args.num_samples and processed >= (args.num_samples // world_size):
-                break
             continue
 
         # Deterministic seed per sample
@@ -256,7 +257,12 @@ def main():
 
         # image = item['image']
         question = item.get('question', "Extract all text from the image in reading order.")
-        answer_gt = item.get('quote', "").replace("\n", " ").strip().replace('“', '"').replace('”', '"')[:120]
+        answer_gt = item.get('text', item.get('answer', "")).replace("\n", " ").strip()[:120]
+        answer_input_ids = tokenizer(answer_gt, add_special_tokens=False)['input_ids']
+        answer_template = deepcopy(answer_input_ids)  # copy answer_input_ids
+        answer_template[1:] = [MASK] * (len(answer_template) - 1)  # Mask all but first token
+        
+        # Make image
         image = generate_image('# ' + answer_gt, template="clean_light", width=512, height=512, quality=100)
         image_save_path = os.path.join(args.output_dir, f"metadata", f"{i:05d}.png")
         prompt_save_path = os.path.join(args.output_dir, f"metadata", f"{i:05d}.txt")
@@ -282,7 +288,10 @@ def main():
 
         # Prepare generation input
         code_start = len(input_token) + 1
-        input_token = input_token + [BOA] + [MASK] * args.gen_length
+        if args.give_first_token:
+            input_token = input_token + [BOA] + answer_template + [EOA]
+        else:
+            input_token = input_token + [BOA] + [MASK] * len(answer_template) + [EOA]
         input_ids = torch.tensor(input_token, device=device).unsqueeze(0)
 
         # Generate
@@ -314,12 +323,8 @@ def main():
         append_jsonl(jsonl_path, record)
 
         # Prevent VRAM accumulation
-        processed += 1
         gc.collect()
         torch.cuda.empty_cache()
-
-        if args.num_samples and processed >= (args.num_samples // world_size):
-            break
 
     # Synchronize all ranks before aggregation
     if world_size > 1:

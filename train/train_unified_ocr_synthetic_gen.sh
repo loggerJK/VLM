@@ -3,7 +3,7 @@ set -e
 
 # 사용할 GPU 지정 (4,5,6,7)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # 사용자 아이디에 따른 HF_HOME 설정
 if echo $USER | grep -q "cvlab20"; then
@@ -27,8 +27,8 @@ n_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
 accum_iter=32
 dropout=0.05
 lora_rank=128
-max_seq_len=2048
-exp_name="TEST_lora128_ocr_wohead"
+max_seq_len=5120
+exp_name="lora128_ocr_synthetic_wohead_gen"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
@@ -37,7 +37,7 @@ source .env
 
 mkdir -p "$output_dir"
 
-echo "Starting OCR training (unified)..."
+echo "Starting OCR Synthetic training (unified)..."
 echo "Output Directory: $output_dir"
 
 # Torchrun 실행
@@ -45,7 +45,8 @@ python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
     --master_port=29506 \
     train/train_unified.py \
-    --task ocr \
+    --task ocr_synthetic \
+    --mode gen \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter ${accum_iter} \
     --epochs ${epochs} \
@@ -59,7 +60,7 @@ python -m torch.distributed.run \
     --und_image_size 512 \
     --data_parallel none \
     --data_config $data_config \
-    --num_workers 32 \
+    --num_workers 2 \
     --output_dir "$output_dir" \
     --save_iteration_interval 500 \
     --validation_interval 500 \
@@ -74,6 +75,5 @@ python -m torch.distributed.run \
     --lora_rank ${lora_rank} \
     --ckpt_max_keep ${ckpt_max_keep} \
     --wo_lm_head \
-    --dataset_path "Jiwon-Kang/Llama-Nemotron-VLM-Dataset-v1-OCR4" \
+    --eval_everything \
     2>&1 | tee "$output_dir/output.log"
-    # --use_compile \

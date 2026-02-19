@@ -49,6 +49,9 @@ from utils.image_utils import (
 from generators.image_generation_generator import generate_image
 from utils.prompt_utils import generate_text_to_image_prompt, create_prompt_templates
 from utils.generation_utils import setup_seed
+from utils.ocr_render import generate_image as generate_ocr_image
+from datasets import load_dataset
+
 
 # Special Tokens
 MASK = SPECIAL_TOKENS["mask_token"]
@@ -205,8 +208,8 @@ def main():
     parser.add_argument("--width", type=int, default=512, help="Generated image width")
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="LoRA checkpoint path")
     parser.add_argument("--num_samples", type=int, default=0, help="Number of samples (0=all)")
-    parser.add_argument("--prompt_file", type=str, required=True,
-                        help="Path to text file with prompts (e.g. word.txt or sentence.txt)")
+    parser.add_argument("--dataset_path", type=str, default="agentlans/high-quality-english-sentences")
+
     parser.add_argument("--ocr_model_path", type=str, default="zai-org/GLM-OCR",
                         help="GLM-OCR model path")
     parser.add_argument("--ocr_device", type=str, default=None,
@@ -243,17 +246,24 @@ def main():
     # ================================================================
     print(f"[Rank {rank}] ===== Stage 1: Image Generation =====")
 
-    # Load prompts from text file
-    print(f"[Rank {rank}] Loading prompts from: {args.prompt_file}...")
-    with open(args.prompt_file, "r") as f:
-        prompts = [line.strip() for line in f]
+    # # Load prompts from text file
+    # print(f"[Rank {rank}] Loading prompts from: {args.prompt_file}...")
+    # with open(args.prompt_file, "r") as f:
+    #     prompts = [line.strip() for line in f]
 
-    total_samples = len(prompts)
-    if args.num_samples > 0:
-        total_samples = min(args.num_samples, total_samples)
-        prompts = prompts[:total_samples]
+    # total_samples = len(prompts)
+    # if args.num_samples > 0:
+    #     total_samples = min(args.num_samples, total_samples)
+    #     prompts = prompts[:total_samples]
+    
+    # Load dataset 
+    dataset = load_dataset(args.dataset_path, split="test", streaming=False)
+    # Select Samples
+    num_to_select = min(args.num_samples, len(dataset)) if args.num_samples > 0 else len(dataset)
+    dataset = dataset.select(list(range(0, num_to_select)))
+    args.num_samples = len(dataset)
 
-    print(f"[Rank {rank}] Loaded {total_samples} prompts from {args.prompt_file}")
+    print(f"[Rank {rank}] Loaded {args.num_samples} samples from dataset {args.dataset_path}")
 
     # We need to collect (index, answer_gt) mapping for Stage 2,
     # so save a metadata JSONL during Stage 1
@@ -305,11 +315,11 @@ def main():
     # Stage 1 eval loop
     print(f"[Rank {rank}] Starting image generation...")
     processed = 0
-    for i, answer_gt in tqdm(enumerate(prompts), total=total_samples, desc=f"Rank {rank} Stage1"):
-        answer_gt = answer_gt.lstrip("#").strip()  # Remove leading "#" and whitespace
-        
+    for i, sample in tqdm(enumerate(dataset), total=args.num_samples, desc=f"Rank {rank} Stage1"):
         if i % world_size != rank:
             continue
+
+        answer_gt = sample.get('text', sample.get('answer', "")).replace("\n", " ").strip()[:120]
 
         if not answer_gt or not answer_gt.strip():
             continue

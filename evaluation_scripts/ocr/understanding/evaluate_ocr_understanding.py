@@ -235,16 +235,19 @@ def main():
 
     # Eval loop
     print(f"[Rank {rank}] Starting OCR understanding evaluation...")
-    processed = 0
+    # Pre-compute local indices for this rank (handles remainder correctly)
+    local_indices = list(range(rank, args.num_samples, world_size))
+    local_indices_set = set(local_indices)
+    max_local_idx = max(local_indices) if local_indices else -1
+
     for i, item in tqdm(enumerate(dataset), total=args.num_samples, desc=f"Rank {rank}"):
-        if i % world_size != rank:
+        if i > max_local_idx:
+            break
+        if i not in local_indices_set:
             continue
 
         # Resume: skip already-processed indices
         if i in done_indices:
-            processed += 1
-            if args.num_samples and processed >= (args.num_samples // world_size):
-                break
             continue
 
         # Deterministic seed per sample
@@ -303,12 +306,8 @@ def main():
         append_jsonl(jsonl_path, record)
 
         # Prevent VRAM accumulation
-        processed += 1
         gc.collect()
         torch.cuda.empty_cache()
-
-        if args.num_samples and processed >= (args.num_samples // world_size):
-            break
 
     # Synchronize all ranks before aggregation
     if world_size > 1:

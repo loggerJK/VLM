@@ -28,7 +28,7 @@ accum_iter=32
 dropout=0.05
 lora_rank=128
 max_seq_len=2048
-exp_name="lora128_ocr_synthetic_wohead"
+exp_name="TEST_lora128_ocr_synthetic_wohead"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
@@ -59,7 +59,7 @@ python -m torch.distributed.run \
     --und_image_size 512 \
     --data_parallel none \
     --data_config $data_config \
-    --num_workers 4 \
+    --num_workers 2 \
     --output_dir "$output_dir" \
     --save_iteration_interval 500 \
     --validation_interval 500 \

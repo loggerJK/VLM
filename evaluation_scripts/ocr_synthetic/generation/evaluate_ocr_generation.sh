@@ -9,37 +9,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 base_dir="/mnt/data1"
 checkpoint_path="jiwon/Lumina-DiMOO/output"
 NUM_SAMPLES=250
-prompt_type="sentence"  # or "word"
-OUTPUT_BASE="${base_dir}/dvlm/lumina/ocr_synthetic/generation_${prompt_type}"
-
-run_eval() {
-    local output_dir="$1"
-    shift  # remaining args passed through (e.g. --lora_ckpt_path ...)
-
-    torchrun --nproc_per_node=$NGPUS \
-        ${SCRIPT_DIR}/evaluate_ocr_generation_detailed_textfile.py \
-        --checkpoint Alpha-VLLM/Lumina-DiMOO \
-        --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-        --output_dir "${output_dir}" \
-        --prompt_file ${SCRIPT_DIR}/${prompt_type}.txt \
-        --timesteps 64 \
-        --cfg_scale 4.0 \
-        --height 1024 \
-        --width 1024 \
-        --ocr_model_path zai-org/GLM-OCR \
-        --num_samples ${NUM_SAMPLES} \
-        "$@"
-}
 
 # ---------------------------------------------------------------------------- #
 #                                   baseline                                   #
 # ---------------------------------------------------------------------------- #
 
 echo "========================================"
-echo "Running baseline OCR generation evaluation for ${prompt_type} dataset"
+echo "Running baseline OCR generation evaluation for quotes dataset "
 echo "========================================"
 
-run_eval "${OUTPUT_BASE}/baseline"
+torchrun --nproc_per_node=$NGPUS \
+    evaluation_scripts/ocr_synthetic/generation/evaluate_ocr_generation.py \
+    --checkpoint Alpha-VLLM/Lumina-DiMOO \
+    --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+    --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/generation/baseline \
+    --timesteps 64 \
+    --cfg_scale 4.0 \
+    --height 1024 \
+    --width 1024 \
+    --ocr_model_path zai-org/GLM-OCR \
+    --num_samples ${NUM_SAMPLES}
 
 # ---------------------------------------------------------------------------- #
 #                               OCR_Understanding                              #
@@ -70,10 +59,21 @@ ckpt_list=(
 
 for ckpt in "${ckpt_list[@]}"; do
     echo "========================================"
-    echo "Running OCR generation evaluation for checkpoint: $ckpt on ${prompt_type} dataset"
+    echo "Running OCR generation evaluation for checkpoint: $ckpt on quotes dataset"
     echo "========================================"
 
-    run_eval "${OUTPUT_BASE}/${ckpt}" --lora_ckpt_path "${base_dir}/${checkpoint_path}/${ckpt}"
+    torchrun --nproc_per_node=$NGPUS \
+        evaluation_scripts/ocr_synthetic/generation/evaluate_ocr_generation.py \
+        --checkpoint Alpha-VLLM/Lumina-DiMOO \
+        --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+        --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
+        --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/generation/${ckpt} \
+        --timesteps 64 \
+        --cfg_scale 4.0 \
+        --height 1024 \
+        --width 1024 \
+        --ocr_model_path zai-org/GLM-OCR \
+        --num_samples ${NUM_SAMPLES}
 
 done
 
@@ -90,8 +90,19 @@ ckpt_list=(
 
 for ckpt in "${ckpt_list[@]}"; do
     echo "========================================"
-    echo "Running OCR generation evaluation for checkpoint: $ckpt on ${prompt_type} dataset"
+    echo "Running OCR generation evaluation for checkpoint: $ckpt on quotes dataset"
     echo "========================================"
 
-    run_eval "${OUTPUT_BASE}/${ckpt}" --lora_ckpt_path "${base_dir}/${checkpoint_path}/${ckpt}"
+    torchrun --nproc_per_node=$NGPUS \
+        evaluation_scripts/ocr_synthetic/generation/evaluate_ocr_generation.py \
+        --checkpoint Alpha-VLLM/Lumina-DiMOO \
+        --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+        --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
+        --output_dir ${base_dir}/dvlm/lumina/ocr_synthetic/generation/${ckpt} \
+        --timesteps 64 \
+        --cfg_scale 4.0 \
+        --height 1024 \
+        --width 1024 \
+        --ocr_model_path zai-org/GLM-OCR \
+        --num_samples ${NUM_SAMPLES}
 done

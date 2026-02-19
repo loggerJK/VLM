@@ -294,9 +294,15 @@ def main():
 
     # Stage 1 eval loop
     print(f"[Rank {rank}] Starting image generation...")
-    processed = 0
+    # Pre-compute local indices for this rank (handles remainder correctly)
+    local_indices = list(range(rank, args.num_samples, world_size))
+    local_indices_set = set(local_indices)
+    max_local_idx = max(local_indices) if local_indices else -1
+
     for i, item in tqdm(enumerate(dataset), total=args.num_samples, desc=f"Rank {rank} Stage1"):
-        if i % world_size != rank:
+        if i > max_local_idx:
+            break
+        if i not in local_indices_set:
             continue
 
         answer_gt = item.get('answer', "")
@@ -312,9 +318,6 @@ def main():
 
         # Resume: skip if image already exists
         if os.path.exists(save_path) and i in existing_meta:
-            processed += 1
-            if args.num_samples and processed >= (args.num_samples // world_size):
-                break
             continue
 
         # Deterministic seed per sample
@@ -383,12 +386,8 @@ def main():
         print(f"[Rank {rank}][{i+1}] Image saved: {save_path}")
 
         # Prevent VRAM accumulation
-        processed += 1
         gc.collect()
         torch.cuda.empty_cache()
-
-        if args.num_samples and processed >= (args.num_samples // world_size):
-            break
 
     # Unload Stage 1 models to free VRAM
     print(f"[Rank {rank}] Stage 1 complete. Unloading LLaDA + VQVAE...")

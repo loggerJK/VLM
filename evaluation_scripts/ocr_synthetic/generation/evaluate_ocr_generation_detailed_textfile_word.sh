@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 base_dir="/mnt/data1"
 checkpoint_path="jiwon/Lumina-DiMOO/output"
 NUM_SAMPLES=250
-prompt_type="sentence"  # or "word"
+prompt_type="word"  # or "word"
 OUTPUT_BASE="${base_dir}/dvlm/lumina/ocr_synthetic/generation_${prompt_type}"
 
 run_eval() {
