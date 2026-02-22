@@ -29,6 +29,7 @@ NUM_WORKERS=32          # Dataloader Workers
 SAVE_STEPS=500           # 매 n 스텝마다 체크포인트 저장
 LOG_FREQ=50             # 매 n 스텝마다 Validation
 TASK="counting"          # 'pointing' (question/answer) or 'counting' (question_count/answer_count)
+MODE="und"               # 'und' (understanding), 'gen' (generation), 'both'
 
 # WandB 로그인
 if [ -n "$WANDB_API_KEY" ]; then
@@ -86,4 +87,5 @@ $LAUNCH_CMD train_counting.py \
     --log_freq "$LOG_FREQ" \
     --lora_r "$LORA_R" \
     --lora_alpha "$LORA_ALPHA" \
-    --task "$TASK" 
+    --task "$TASK" \
+    --mode "$MODE"

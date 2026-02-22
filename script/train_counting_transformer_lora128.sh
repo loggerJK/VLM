@@ -1,24 +1,25 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# Janus-Pro-7B Training Script (counting / generation / both)
+# Janus-Pro-7B Training Script (und / gen / both)
 # -----------------------------------------------------------------------------
 # Usage:
-#   bash script/train_counting_transformer_lora128.sh counting
-#   bash script/train_counting_transformer_lora128.sh generation
-#   bash script/train_counting_transformer_lora128.sh both
-#   bash script/train_counting_transformer_lora128.sh both ./checkpoints/.../step-500  # resume
+#   bash script/train_counting_transformer_lora128.sh und counting
+#   bash script/train_counting_transformer_lora128.sh gen
+#   bash script/train_counting_transformer_lora128.sh both counting
+#   bash script/train_counting_transformer_lora128.sh both counting ./checkpoints/.../step-500  # resume
 # -----------------------------------------------------------------------------
 
-# [설정] Task & Resume (스크립트 인자)
-TASK="${1:-counting}"
-RESUME_CKPT="${2:-}"
+# [설정] Mode, Task & Resume (스크립트 인자)
+MODE="${1:-und}"
+TASK="${2:-counting}"
+RESUME_CKPT="${3:-}"
 
 # [설정] WandB API Key (.env 파일에서 로드)
 source ./.env
 export CUDA_VISIBLE_DEVICES=3
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
-export WANDB_NAME="train[transformer_lora128]_task[${TASK}]_dset[heez_pixmo_point_count]"
+export WANDB_NAME="train[transformer_lora128]_mode[${MODE}]_task[${TASK}]_dset[heez_pixmo_point_count]"
 
 # [설정] 사전 학습된 Janus 모델 경로
 MODEL_PATH="deepseek-ai/Janus-Pro-7B"
@@ -57,12 +58,12 @@ else
     LAUNCH_CMD="python"
 fi
 
-# Task별 인자 구성
-TASK_ARGS="--task $TASK"
-if [ "$TASK" = "counting" ] || [ "$TASK" = "both" ]; then
+# Task/Mode별 인자 구성
+TASK_ARGS="--task $TASK --mode $MODE"
+if [ "$MODE" = "und" ] || [ "$MODE" = "both" ]; then
     TASK_ARGS="$TASK_ARGS --data_path $DATA_PATH"
 fi
-if [ "$TASK" = "generation" ] || [ "$TASK" = "both" ]; then
+if [ "$MODE" = "gen" ] || [ "$MODE" = "both" ]; then
     TASK_ARGS="$TASK_ARGS --gen_data_path $GEN_DATA_PATH"
 fi
 if [ -n "$RESUME_CKPT" ]; then
@@ -86,6 +87,7 @@ echo "Grad Checkpoint  : $USE_GRAD_CHECKPOINT"
 echo "Save Steps       : $SAVE_STEPS"
 echo "Epochs           : $EPOCHS"
 echo "Log Freq         : $LOG_FREQ"
+echo "Mode             : $MODE"
 echo "Task             : $TASK"
 echo "Resume Ckpt      : ${RESUME_CKPT:-none}"
 echo "Task Args        : $TASK_ARGS"

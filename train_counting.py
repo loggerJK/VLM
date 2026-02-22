@@ -587,9 +587,9 @@ class ValidationCallback(TrainerCallback):
 
         if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
         # if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
-            if self.args.task in ["counting", "pointing", "both"]:
+            if self.args.mode in ["und", "both"]:
                 self.validate(model, state)
-            if self.args.task in ["generation", "both"]:
+            if self.args.mode in ["gen", "both"]:
                 self.validate_generation(model, state)
 
     def on_epoch_end(self, args, state, control, model=None, **kwargs):
@@ -773,8 +773,11 @@ def main():
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank (if tuning_mode is 'lora')")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (if tuning_mode is 'lora')")
     parser.add_argument("--task", type=str, default="counting",
-                        choices=["counting", "pointing", "generation", "both"],
-                        help="Task: counting/pointing (understanding), generation (T2I), both (multi-task)")
+                        choices=["counting", "pointing"],
+                        help="Task domain: counting or pointing")
+    parser.add_argument("--mode", type=str, default="und",
+                        choices=["und", "gen", "both"],
+                        help="Training mode: und (understanding), gen (generation), both")
     parser.add_argument("--gen_data_path", type=str, default=None,
                         help="HuggingFace dataset name or local path for generation data (text+image pairs)")
     parser.add_argument("--gen_img_size", type=int, default=384, help="Image size for VQ encoding")
@@ -790,8 +793,8 @@ def main():
     os.environ["WANDB_PROJECT"] = "janus-counting"
 
     # Validate args
-    if args.task in ["generation", "both"] and args.gen_data_path is None:
-        raise ValueError("--gen_data_path is required for generation/both task")
+    if args.mode in ["gen", "both"] and args.gen_data_path is None:
+        raise ValueError("--gen_data_path is required for gen/both mode")
 
     # Helper: load a HF or local dataset
     def _load_raw_dataset(path, split="train"):
@@ -841,21 +844,21 @@ def main():
             return ds  # map-style dataset with images already loaded
         return StreamingDatasetWrapper(ds)
 
-    # Load datasets based on task
-    if args.task in ["counting", "pointing"]:
+    # Load datasets based on mode
+    if args.mode == "und":
         raw_dataset = _load_raw_dataset(args.data_path)
         if _has_descriptions_column(raw_dataset):
             raw_dataset = _filter_und(raw_dataset)
             print(f"[INFO] Filtered understanding samples: {len(raw_dataset)}")
         train_dataset = _maybe_wrap(raw_dataset)
-    elif args.task == "generation":
+    elif args.mode == "gen":
         gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
         if _has_descriptions_column(gen_raw_dataset):
             gen_raw_dataset = _filter_gen(gen_raw_dataset)
             gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
             print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
         train_dataset = _maybe_wrap(gen_raw_dataset)
-    elif args.task == "both":
+    elif args.mode == "both":
         from torch.utils.data import ConcatDataset
         # Understanding dataset
         und_raw_dataset = _load_raw_dataset(args.data_path)
@@ -968,8 +971,8 @@ def main():
         report_to="wandb",
         remove_unused_columns=False,
         gradient_checkpointing=bool(args.gradient_checkpointing),
-        ddp_find_unused_parameters=True if args.task in ["generation", "both"] else (False if args.gradient_checkpointing else None),
-        dataloader_num_workers=0 if args.task in ["generation", "both"] else args.num_workers,
+        ddp_find_unused_parameters=True if args.mode in ["gen", "both"] else (False if args.gradient_checkpointing else None),
+        dataloader_num_workers=0 if args.mode in ["gen", "both"] else args.num_workers,
         # split_batches=True,
         # dispatch_batches=False
         accelerator_config = {
@@ -979,15 +982,15 @@ def main():
     )
     
     # Get VQ model reference for generation collate (frozen, on CPU initially)
-    vq_model_ref = model.gen_vision_model if args.task in ["generation", "both"] else None
+    vq_model_ref = model.gen_vision_model if args.mode in ["gen", "both"] else None
 
-    if args.task in ["counting", "pointing"]:
+    if args.mode == "und":
         def data_collator(batch):
             return collate_fn(batch, processor, task=args.task)
-    elif args.task == "generation":
+    elif args.mode == "gen":
         def data_collator(batch):
             return collate_fn_generation(batch, processor, vq_model_ref, img_size=args.gen_img_size)
-    elif args.task == "both":
+    elif args.mode == "both":
         def data_collator(batch):
             return collate_fn_both(batch, processor, vq_model_ref, task=args.task, img_size=args.gen_img_size)
 

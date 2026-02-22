@@ -8,8 +8,9 @@
 #   bash script/train_counting_gen_transformer_lora128.sh ./checkpoints/.../step-500  # resume
 # -----------------------------------------------------------------------------
 
-# [설정] Task & Resume (스크립트 인자)
-TASK="generation"
+# [설정] Mode, Task & Resume (스크립트 인자)
+MODE="gen"
+TASK="counting"
 RESUME_CKPT="${1:-}"
 
 # [설정] WandB API Key (.env 파일에서 로드)
@@ -17,7 +18,7 @@ source ./.env
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=4,5
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
-export WANDB_NAME="train[transformer_lora128]_task[generation]_dset[heez_pixmo_point_count]"
+export WANDB_NAME="train[transformer_lora128]_mode[gen]_dset[heez_pixmo_point_count]"
 
 # [설정] 사전 학습된 Janus 모델 경로
 MODEL_PATH="deepseek-ai/Janus-Pro-7B"
@@ -58,7 +59,7 @@ else
 fi
 
 # Task별 인자 구성
-TASK_ARGS="--task $TASK --gen_data_path $GEN_DATA_PATH --gen_img_size 384"
+TASK_ARGS="--task $TASK --mode $MODE --gen_data_path $GEN_DATA_PATH --gen_img_size 384"
 if [ -n "$RESUME_CKPT" ]; then
     TASK_ARGS="$TASK_ARGS --resume_checkpoint $RESUME_CKPT"
 fi
@@ -83,6 +84,7 @@ echo "Grad Checkpoint  : $USE_GRAD_CHECKPOINT"
 echo "Save Steps       : $SAVE_STEPS"
 echo "Epochs           : $EPOCHS"
 echo "Log Freq         : $LOG_FREQ"
+echo "Mode             : $MODE"
 echo "Task             : $TASK"
 echo "Resume Ckpt      : ${RESUME_CKPT:-none}"
 echo "Task Args        : $TASK_ARGS"

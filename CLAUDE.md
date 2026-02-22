@@ -23,13 +23,14 @@ bash script/train_counting_0.sh
 
 # Direct launch (multi-GPU)
 accelerate launch --num_processes 2 train_counting.py \
-    --task counting \
+    --task counting --mode und \
     --data_path ./data/pixmo_processed \
     --model_path deepseek-ai/Janus-Pro-7B \
     --tuning_mode transformer_lora \
     --batch_size 2 --lr 1e-4 --epochs 3
 
-# Task modes: counting, pointing, generation, both
+# --task: counting, pointing (data domain)
+# --mode: und (understanding), gen (generation), both
 ```
 
 ### VQ Encode/Decode Test
@@ -43,7 +44,7 @@ python test_scripts/test_vq_encode_decode.py \
 ## Architecture
 
 ### Training Entry Points
-- **`train_counting.py`** — Main training script for all tasks (counting, pointing, generation, both)
+- **`train_counting.py`** — Main training script (--task: counting/pointing, --mode: und/gen/both)
 - **`train_points.py`** — Pointing task variant with coordinate regression
 - **`train_counting.sh`** / **`script/`** — Shell launchers with preset hyperparameters
 
@@ -87,7 +88,8 @@ checkpoints/<run_name>/
 - Generation: autoregressively generates images from 4 fixed prompts, logs to WandB
 
 ## Key Arguments (`train_counting.py`)
-- `--task {counting,pointing,generation,both}` — Task mode
+- `--task {counting,pointing}` — Task domain (data format)
+- `--mode {und,gen,both}` — Training mode (understanding, generation, or both)
 - `--tuning_mode {transformer_lora,transformer,full}` — What to train
 - `--lora_r` / `--lora_alpha` — LoRA rank and scaling (defaults: 16, 32)
 - `--data_path` — Understanding dataset path
@@ -97,7 +99,7 @@ checkpoints/<run_name>/
 ## Notes
 - GPU VRAM: 32GB+ recommended
 - Training uses bf16 (falls back to fp16)
-- `ddp_find_unused_parameters=True` is required for generation/both tasks
+- `ddp_find_unused_parameters=True` is required for gen/both modes
 - Generation dataset samples need `image` + one of `text`/`caption`/`prompt` fields
 - Understanding dataset samples need `image` + `question_count`/`question` + answer fields
 - Project language: comments and docs are mixed Korean/English
