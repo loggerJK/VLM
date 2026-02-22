@@ -17,9 +17,14 @@ modelscope download --model deepseek-ai/Janus-Pro-7B --local_dir ./Janus-Pro-7B
 
 ### Training
 ```bash
-# Via shell script (edit hyperparameters inside)
-bash train_counting.sh
-bash script/train_counting_0.sh
+# Via shell script (accepts MODE TASK [RESUME_CKPT] arguments)
+bash script/train_counting_transformer_lora128.sh und counting
+bash script/train_counting_transformer_lora128.sh gen
+bash script/train_counting_transformer_lora128.sh both counting
+bash script/train_counting_transformer_lora128.sh both counting ./checkpoints/.../step-500  # resume
+
+# Generation-only (dedicated script)
+bash script/train_counting_gen_transformer_lora128.sh
 
 # Direct launch (multi-GPU)
 accelerate launch --num_processes 2 train_counting.py \
@@ -29,8 +34,13 @@ accelerate launch --num_processes 2 train_counting.py \
     --tuning_mode transformer_lora \
     --batch_size 2 --lr 1e-4 --epochs 3
 
-# --task: counting, pointing (data domain)
+# --task: counting, ocr (data domain — orthogonal to mode)
 # --mode: und (understanding), gen (generation), both
+```
+
+### Smoke Test (3 modes)
+```bash
+bash script/test_three_modes.sh   # runs und/gen/both for 3 steps each
 ```
 
 ### VQ Encode/Decode Test
@@ -44,9 +54,11 @@ python test_scripts/test_vq_encode_decode.py \
 ## Architecture
 
 ### Training Entry Points
-- **`train_counting.py`** — Main training script (--task: counting/pointing, --mode: und/gen/both)
+- **`train_counting.py`** — Main training script (--task and --mode are orthogonal)
+  - `--task {counting,ocr}` — Data domain (determines dataset format/loading)
+  - `--mode {und,gen,both}` — Training mode (understanding, generation, or both)
 - **`train_points.py`** — Pointing task variant with coordinate regression
-- **`train_counting.sh`** / **`script/`** — Shell launchers with preset hyperparameters
+- **`script/`** — Shell launchers with preset hyperparameters (accept `MODE TASK [RESUME_CKPT]` args)
 
 ### Model (`janus/models/`)
 - `modeling_vlm.py` — Base `MultiModalityCausalLM` with config classes
@@ -88,13 +100,17 @@ checkpoints/<run_name>/
 - Generation: autoregressively generates images from 4 fixed prompts, logs to WandB
 
 ## Key Arguments (`train_counting.py`)
-- `--task {counting,pointing}` — Task domain (data format)
+- `--task {counting,ocr}` — Data domain (determines dataset format, orthogonal to mode)
 - `--mode {und,gen,both}` — Training mode (understanding, generation, or both)
-- `--tuning_mode {transformer_lora,transformer,full}` — What to train
+- `--tuning_mode {transformer_lora,transformer,transformer_ONLY,full,lora}` — What to train
 - `--lora_r` / `--lora_alpha` — LoRA rank and scaling (defaults: 16, 32)
-- `--data_path` — Understanding dataset path
-- `--gen_data_path` — Generation dataset path (HF dataset or local)
+- `--data_path` — Understanding dataset path (required for mode=und/both)
+- `--gen_data_path` — Generation dataset path, HF dataset or local (required for mode=gen/both)
 - `--gen_img_size` — VQ encoding image size (default: 384)
+- `--max_steps` — Max training steps (-1 for unlimited)
+- `--resume_checkpoint` — Path to checkpoint directory for resuming training
+- `--use_8bit_adam` — Use 8-bit AdamW from bitsandbytes (flag)
+- `--run_name` — WandB run name override
 
 ## Notes
 - GPU VRAM: 32GB+ recommended

@@ -234,11 +234,51 @@ class StreamingDatasetWrapper(torch.utils.data.IterableDataset):
             output_item['image'] = image
             yield output_item
 
+class OCRSyntheticDataset(torch.utils.data.Dataset):
+    """agentlans/high-quality-english-sentences -> runtime image rendering"""
+
+    MATHPIX_CAPTION_PREFIX = (
+        "A Mathpix Markdown format with sharp, legible black text. "
+        "High-resolution typography, top-down view. "
+        "The text is rendered in natural left-to-right, top-to-bottom reading order. "
+        "The text reads:\n"
+    )
+
+    def __init__(self, hf_dataset, mode="und", ocr_image_width=512):
+        self.dataset = hf_dataset
+        self.mode = mode
+        self.ocr_image_width = ocr_image_width
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def _render_image(self, text):
+        from ocr_render import generate_image
+        return generate_image(
+            "# " + text, template="random",
+            width=self.ocr_image_width, height=self.ocr_image_width,  # square (BAGEL/Lumina)
+            quality=100,  # max quality (BAGEL/Lumina)
+        ).convert("RGB")
+
+    def __getitem__(self, idx):
+        raw_text = self.dataset[idx]["text"]
+        answer = raw_text.replace("\n", " ").strip()[:120]  # BAGEL convention
+        image = self._render_image(answer)
+
+        if self.mode == "und":
+            return {"image": image, "question": "Extract all text from the image.", "answer": answer}
+        else:  # gen
+            caption = self.MATHPIX_CAPTION_PREFIX + raw_text
+            return {"image": image, "text": caption}
+
+
 def collate_fn(batch, processor, task="counting"):
     prepare_list = []
 
-    q_col = 'question' if task == 'pointing' else 'question_count'
-    a_col = 'answer' if task == 'pointing' else 'answer_count'
+    if task == 'ocr':
+        q_col, a_col = 'question', 'answer'
+    else:  # counting
+        q_col, a_col = 'question_count', 'answer_count'
 
     for item in batch:
         image = item.get('image')
@@ -587,10 +627,16 @@ class ValidationCallback(TrainerCallback):
 
         if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
         # if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
-            if self.args.mode in ["und", "both"]:
-                self.validate(model, state)
-            if self.args.mode in ["gen", "both"]:
-                self.validate_generation(model, state)
+            if self.args.task == "counting":
+                if self.args.mode in ["und", "both"]:
+                    self.validate(model, state)
+                if self.args.mode in ["gen", "both"]:
+                    self.validate_generation(model, state)
+            elif self.args.task == "ocr":
+                if self.args.mode in ["und", "both"]:
+                    self.validate_ocr(model, state)
+                if self.args.mode in ["gen", "both"]:
+                    self.validate_ocr_generation(model, state)
 
     def on_epoch_end(self, args, state, control, model=None, **kwargs):
         if state.is_world_process_zero:
@@ -756,6 +802,156 @@ class ValidationCallback(TrainerCallback):
 
         model.train()
 
+    def _setup_ocr_validation_data(self):
+        """Load OCR validation samples from test split (deterministic rendering)."""
+        from ocr_render import generate_image
+        raw_hf = load_dataset("agentlans/high-quality-english-sentences", split="test")
+        eval_limit = min(100, len(raw_hf))
+        self._ocr_val_samples = []
+        print(f"[OCR Validation] Rendering {eval_limit} validation images (clean_light template)...")
+        for i in range(eval_limit):
+            text = raw_hf[i]["text"].replace("\n", " ").strip()[:120]
+            try:
+                img = generate_image(
+                    "# " + text, template="clean_light",
+                    width=512, height=512, quality=100,  # square, max quality (BAGEL/Lumina)
+                ).convert("RGB")
+                self._ocr_val_samples.append({"image": img, "answer": text})
+            except Exception as e:
+                print(f"  [WARN] Failed to render OCR val sample {i}: {e}")
+                continue
+        print(f"[OCR Validation] Prepared {len(self._ocr_val_samples)} samples")
+
+    def validate_ocr(self, model, state):
+        """OCR understanding validation: render image -> model inference -> OCR metrics."""
+        print(f"\n[Step {state.global_step}] Running OCR Validation...")
+        model.eval()
+
+        if not hasattr(self, '_ocr_val_samples'):
+            self._setup_ocr_validation_data()
+
+        unwrap_model = model.module if hasattr(model, "module") else model
+        device = next(unwrap_model.parameters()).device
+
+        predictions = []
+        references = []
+
+        with torch.no_grad():
+            for i, sample in enumerate(tqdm(self._ocr_val_samples, desc="OCR Validation")):
+                image = sample["image"]
+                gt_text = sample["answer"]
+
+                conversation = [
+                    {"role": "<|User|>", "content": "<image_placeholder>\nExtract all text from the image.", "images": [image]},
+                    {"role": "<|Assistant|>", "content": ""},
+                ]
+                prepare_inputs = self.processor(
+                    conversations=conversation, images=[image], force_batchify=True
+                ).to(device)
+                inputs_embeds = unwrap_model.prepare_inputs_embeds(**prepare_inputs)
+                outputs = unwrap_model.language_model.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=prepare_inputs.attention_mask,
+                    pad_token_id=self.processor.tokenizer.eos_token_id,
+                    max_new_tokens=150,
+                    do_sample=False,
+                    use_cache=True,
+                )
+                pred_text = self.processor.tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
+                predictions.append(pred_text)
+                references.append(gt_text)
+
+        # Calculate Lumina-level OCR metrics
+        from ocr_metrics import calculate_metrics
+        metrics = calculate_metrics(predictions, references)
+
+        print(f"[OCR Validation] WER={metrics['wer']:.4f} CER={metrics['cer']:.4f} "
+              f"BLEU={metrics['bleu']:.4f} METEOR={metrics['meteor']:.4f} "
+              f"EditDist={metrics['edit_distance']:.2f} P={metrics['precision']:.4f} "
+              f"R={metrics['recall']:.4f} F1={metrics['f1']:.4f}")
+
+        if wandb.run is not None:
+            # Lumina-style wandb Table: per-sample prediction logging (max 10)
+            val_table = wandb.Table(columns=["Step", "Image", "GT", "Prediction", "WER", "CER"])
+            for i in range(min(len(predictions), 10)):
+                try:
+                    ind_metrics = calculate_metrics([predictions[i]], [references[i]])
+                    val_table.add_data(
+                        state.global_step,
+                        wandb.Image(self._ocr_val_samples[i]["image"]),
+                        references[i][:100],
+                        predictions[i][:100],
+                        ind_metrics["wer"],
+                        ind_metrics["cer"],
+                    )
+                except Exception:
+                    continue
+
+            wandb.log({
+                "val/ocr_wer": metrics["wer"],
+                "val/ocr_cer": metrics["cer"],
+                "val/ocr_bleu": metrics["bleu"],
+                "val/ocr_meteor": metrics["meteor"],
+                "val/ocr_edit_distance": metrics["edit_distance"],
+                "val/ocr_precision": metrics["precision"],
+                "val/ocr_recall": metrics["recall"],
+                "val/ocr_f1": metrics["f1"],
+                "val/ocr_samples": val_table,
+                "global_step": state.global_step,
+            })
+
+        model.train()
+
+    def _setup_ocr_generation_prompts(self):
+        """Set up OCR generation validation prompts from test split."""
+        raw_hf = load_dataset("agentlans/high-quality-english-sentences", split="test")
+        import random
+        rng = random.Random(42)
+        num_prompts = 5
+        indices = rng.sample(range(len(raw_hf)), min(num_prompts, len(raw_hf)))
+        self._ocr_gen_prompts = []
+        for idx in indices:
+            text = raw_hf[idx]["text"].replace("\n", " ").strip()[:120]
+            caption = OCRSyntheticDataset.MATHPIX_CAPTION_PREFIX + text
+            self._ocr_gen_prompts.append(caption)
+        print(f"[OCR Gen Validation] Selected {len(self._ocr_gen_prompts)} prompts:")
+        for i, p in enumerate(self._ocr_gen_prompts):
+            print(f"  {i+1}. {p[:80]}...")
+
+    def validate_ocr_generation(self, model, state):
+        """OCR generation validation: generate images from Mathpix captions, log to wandb."""
+        print(f"\n[Step {state.global_step}] Running OCR Generation Validation...")
+        model.eval()
+
+        if not hasattr(self, '_ocr_gen_prompts'):
+            self._setup_ocr_generation_prompts()
+
+        unwrap_model = model.module if hasattr(model, "module") else model
+        gen_images = []
+        for prompt_text in self._ocr_gen_prompts:
+            try:
+                pil_img = generate_image_from_prompt(
+                    model=unwrap_model,
+                    processor=self.processor,
+                    prompt_text=prompt_text,
+                    temperature=1.0,
+                    cfg_weight=5.0,
+                    img_size=self.args.gen_img_size,
+                )
+                gen_images.append(wandb.Image(pil_img, caption=prompt_text[:80]))
+            except Exception as e:
+                print(f"  OCR generation validation error: {e}")
+                continue
+
+        if wandb.run is not None and gen_images:
+            wandb.log({
+                "val/ocr_generated_images": gen_images,
+                "global_step": state.global_step,
+            })
+            print(f"  Logged {len(gen_images)} OCR generated images to wandb")
+
+        model.train()
+
 def main():
     parser = argparse.ArgumentParser(description="Train Janus model for counting task")
     parser.add_argument("--tuning_mode", type=str, default="lora", help="Tuning mode: 'full' or 'lora'")
@@ -773,8 +969,12 @@ def main():
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank (if tuning_mode is 'lora')")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (if tuning_mode is 'lora')")
     parser.add_argument("--task", type=str, default="counting",
-                        choices=["counting", "pointing"],
-                        help="Task domain: counting or pointing")
+                        choices=["counting", "ocr"],
+                        help="Task domain: counting or ocr")
+    parser.add_argument("--ocr_num_samples", type=int, default=200000,
+                        help="Number of samples from synthetic OCR dataset (BAGEL default: 200000)")
+    parser.add_argument("--ocr_image_width", type=int, default=512,
+                        help="Width for rendered OCR images")
     parser.add_argument("--mode", type=str, default="und",
                         choices=["und", "gen", "both"],
                         help="Training mode: und (understanding), gen (generation), both")
@@ -790,11 +990,12 @@ def main():
                         help="WandB run name (defaults to output_dir if not set)")
     args = parser.parse_args()
 
-    os.environ["WANDB_PROJECT"] = "janus-counting"
+    if "WANDB_PROJECT" not in os.environ:
+        os.environ["WANDB_PROJECT"] = f"janus-{args.task}"
 
     # Validate args
-    if args.mode in ["gen", "both"] and args.gen_data_path is None:
-        raise ValueError("--gen_data_path is required for gen/both mode")
+    if args.task == "counting" and args.mode in ["gen", "both"] and args.gen_data_path is None:
+        raise ValueError("--gen_data_path is required for counting gen/both mode")
 
     # Helper: load a HF or local dataset
     def _load_raw_dataset(path, split="train"):
@@ -844,36 +1045,53 @@ def main():
             return ds  # map-style dataset with images already loaded
         return StreamingDatasetWrapper(ds)
 
-    # Load datasets based on mode
-    if args.mode == "und":
-        raw_dataset = _load_raw_dataset(args.data_path)
-        if _has_descriptions_column(raw_dataset):
-            raw_dataset = _filter_und(raw_dataset)
-            print(f"[INFO] Filtered understanding samples: {len(raw_dataset)}")
-        train_dataset = _maybe_wrap(raw_dataset)
-    elif args.mode == "gen":
-        gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
-        if _has_descriptions_column(gen_raw_dataset):
-            gen_raw_dataset = _filter_gen(gen_raw_dataset)
-            gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
-            print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
-        train_dataset = _maybe_wrap(gen_raw_dataset)
-    elif args.mode == "both":
-        from torch.utils.data import ConcatDataset
-        # Understanding dataset
-        und_raw_dataset = _load_raw_dataset(args.data_path)
-        if _has_descriptions_column(und_raw_dataset):
-            und_raw_dataset = _filter_und(und_raw_dataset)
-            print(f"[INFO] Filtered understanding samples: {len(und_raw_dataset)}")
-        # Generation dataset
-        gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
-        if _has_descriptions_column(gen_raw_dataset):
-            gen_raw_dataset = _filter_gen(gen_raw_dataset)
-            gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
-            print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
-        und_dataset = _maybe_wrap(und_raw_dataset)
-        gen_dataset = _maybe_wrap(gen_raw_dataset)
-        train_dataset = ConcatDataset([und_dataset, gen_dataset])
+    # Load datasets based on task and mode
+    if args.task == "ocr":
+        raw_hf = load_dataset("agentlans/high-quality-english-sentences", split="train", num_proc=64)
+        n = min(args.ocr_num_samples, len(raw_hf))
+        raw_hf = raw_hf.select(range(n))
+        print(f"[INFO] Loaded OCR synthetic dataset: {n} samples")
+
+        if args.mode == "und":
+            train_dataset = OCRSyntheticDataset(raw_hf, mode="und", ocr_image_width=args.ocr_image_width)
+        elif args.mode == "gen":
+            train_dataset = OCRSyntheticDataset(raw_hf, mode="gen", ocr_image_width=args.ocr_image_width)
+        elif args.mode == "both":
+            from torch.utils.data import ConcatDataset
+            und_ds = OCRSyntheticDataset(raw_hf, mode="und", ocr_image_width=args.ocr_image_width)
+            gen_ds = OCRSyntheticDataset(raw_hf, mode="gen", ocr_image_width=args.ocr_image_width)
+            train_dataset = ConcatDataset([und_ds, gen_ds])
+
+    elif args.task == "counting":
+        if args.mode == "und":
+            raw_dataset = _load_raw_dataset(args.data_path)
+            if _has_descriptions_column(raw_dataset):
+                raw_dataset = _filter_und(raw_dataset)
+                print(f"[INFO] Filtered understanding samples: {len(raw_dataset)}")
+            train_dataset = _maybe_wrap(raw_dataset)
+        elif args.mode == "gen":
+            gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
+            if _has_descriptions_column(gen_raw_dataset):
+                gen_raw_dataset = _filter_gen(gen_raw_dataset)
+                gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
+                print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
+            train_dataset = _maybe_wrap(gen_raw_dataset)
+        elif args.mode == "both":
+            from torch.utils.data import ConcatDataset
+            # Understanding dataset
+            und_raw_dataset = _load_raw_dataset(args.data_path)
+            if _has_descriptions_column(und_raw_dataset):
+                und_raw_dataset = _filter_und(und_raw_dataset)
+                print(f"[INFO] Filtered understanding samples: {len(und_raw_dataset)}")
+            # Generation dataset
+            gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
+            if _has_descriptions_column(gen_raw_dataset):
+                gen_raw_dataset = _filter_gen(gen_raw_dataset)
+                gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
+                print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
+            und_dataset = _maybe_wrap(und_raw_dataset)
+            gen_dataset = _maybe_wrap(gen_raw_dataset)
+            train_dataset = ConcatDataset([und_dataset, gen_dataset])
     
     print(f"Loading model from {args.model_path}...")
     processor = VLChatProcessor.from_pretrained(args.model_path)
@@ -972,7 +1190,7 @@ def main():
         remove_unused_columns=False,
         gradient_checkpointing=bool(args.gradient_checkpointing),
         ddp_find_unused_parameters=True if args.mode in ["gen", "both"] else (False if args.gradient_checkpointing else None),
-        dataloader_num_workers=0 if args.mode in ["gen", "both"] else args.num_workers,
+        dataloader_num_workers=args.num_workers if (args.task == "ocr" and args.mode == "und") else (0 if args.mode in ["gen", "both"] else args.num_workers),
         # split_batches=True,
         # dispatch_batches=False
         accelerator_config = {

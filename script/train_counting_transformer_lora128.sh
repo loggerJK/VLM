@@ -20,6 +20,7 @@ source ./.env
 export CUDA_VISIBLE_DEVICES=3
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 export WANDB_NAME="train[transformer_lora128]_mode[${MODE}]_task[${TASK}]_dset[heez_pixmo_point_count]"
+export WANDB_PROJECT="janus-counting"
 
 # [설정] 사전 학습된 Janus 모델 경로
 MODEL_PATH="deepseek-ai/Janus-Pro-7B"
