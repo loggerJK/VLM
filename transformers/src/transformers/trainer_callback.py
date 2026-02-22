@@ -645,12 +645,23 @@ class ProgressCallback(TrainerCallback):
 
     def on_train_begin(self, args, state, control, **kwargs):
         if state.is_world_process_zero:
-            self.training_bar = tqdm(total=state.max_steps, dynamic_ncols=True)
+            self.steps_per_epoch = max(state.max_steps // state.num_train_epochs, 1) if state.num_train_epochs > 0 else state.max_steps
+            self.training_bar = tqdm(total=self.steps_per_epoch, dynamic_ncols=True, desc="Epoch 0")
         self.current_step = 0
+        self._epoch_start_step = 0
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        if state.is_world_process_zero and self.training_bar is not None:
+            current_epoch = int(state.epoch) if state.epoch is not None else 0
+            self.training_bar.reset(total=self.steps_per_epoch)
+            self.training_bar.set_description(f"Epoch {current_epoch}")
+            self._epoch_start_step = state.global_step
 
     def on_step_end(self, args, state, control, **kwargs):
         if state.is_world_process_zero:
-            self.training_bar.update(state.global_step - self.current_step)
+            epoch_step = state.global_step - self._epoch_start_step
+            self.training_bar.n = epoch_step
+            self.training_bar.refresh()
             self.current_step = state.global_step
 
     def on_prediction_step(self, args, state, control, eval_dataloader=None, **kwargs):

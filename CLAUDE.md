@@ -4,93 +4,100 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Fine-tuning DeepSeek Janus-Pro-7B (multimodal vision-language model) for visual counting and pointing tasks using the Pixmo dataset. Uses LoRA for parameter-efficient fine-tuning, with WandB for experiment tracking.
+LoRA fine-tuning framework for **DeepSeek Janus-Pro-7B**, a unified multimodal model supporting both **image understanding** (counting, pointing) and **text-to-image generation**. Training uses HuggingFace Trainer with PEFT/LoRA, WandB logging, and multi-GPU DDP.
 
-## Environment Setup
+## Common Commands
 
+### Environment Setup
 ```bash
-conda create -n janus-pro-lora python=3.10 -y
-conda activate janus-pro-lora
+conda create -n janus-pro-lora python=3.10 -y && conda activate janus-pro-lora
 pip install -r requirements.txt
+modelscope download --model deepseek-ai/Janus-Pro-7B --local_dir ./Janus-Pro-7B
 ```
 
-Key dependencies: torch 2.2.2, transformers 4.48.1, peft 0.14.0, wandb, accelerate.
-
-## Training Commands
-
-Training is launched via shell scripts in `script/`:
-
+### Training
 ```bash
-# Single-GPU (falls back to pdb debugger)
+# Via shell script (edit hyperparameters inside)
+bash train_counting.sh
 bash script/train_counting_0.sh
 
-# Multi-GPU with LoRA r=128 (primary configuration)
-bash script/train_counting_transformer_lora128.sh
+# Direct launch (multi-GPU)
+accelerate launch --num_processes 2 train_counting.py \
+    --task counting \
+    --data_path ./data/pixmo_processed \
+    --model_path deepseek-ai/Janus-Pro-7B \
+    --tuning_mode transformer_lora \
+    --batch_size 2 --lr 1e-4 --epochs 3
 
-# Pointing task
-bash script/point/train_points_transformer_ONLY.sh
+# Task modes: counting, pointing, generation, both
 ```
 
-Multi-GPU runs use `accelerate launch`. GPU selection is via `CUDA_VISIBLE_DEVICES` in the scripts. The `.env` file contains `WANDB_API_KEY`.
-
-### Key training arguments (passed to `train_counting.py` / `train_points.py`)
-
-- `--tuning_mode`: `transformer_lora` | `transformer` | `transformer_ONLY` | `full`
-- `--model_path`: HF model ID (default `deepseek-ai/Janus-Pro-7B`)
-- `--data_path`: HF dataset ID (e.g. `heez/pixmo-point-count-gen-und`)
-- `--task`: `counting` (uses `question_count`/`answer_count` columns) or `pointing` (uses `question`/`answer` columns)
-- `--lora_r`, `--lora_alpha`: LoRA hyperparameters
-
-## Linting
-
-The `transformers/` subdirectory uses Ruff (line-length 119, target py310). The main project code does not have a configured linter.
+### VQ Encode/Decode Test
+```bash
+python test_scripts/test_vq_encode_decode.py \
+    --model_path deepseek-ai/Janus-Pro-7B \
+    --image_path <test_image.png> \
+    --output_dir output/debug_vq
+```
 
 ## Architecture
 
-### Model Pipeline
+### Training Entry Points
+- **`train_counting.py`** — Main training script for all tasks (counting, pointing, generation, both)
+- **`train_points.py`** — Pointing task variant with coordinate regression
+- **`train_counting.sh`** / **`script/`** — Shell launchers with preset hyperparameters
 
+### Model (`janus/models/`)
+- `modeling_vlm.py` — Base `MultiModalityCausalLM` with config classes
+- `clip_encoder.py` / `siglip_vit.py` — SigLIP vision encoder (understanding)
+- `vq_model.py` — VQ-VAE with codebook_size=16384 (generation, encodes images to 576 discrete tokens)
+- `projector.py` — MLP aligner between vision and language features
+- `processing_vlm.py` — `VLChatProcessor` for tokenizing multimodal conversations
+
+### Key Class: `EnhancedMultiModalModel` (in `train_counting.py`)
+Wraps the base model with a custom `forward()` that branches based on input:
+- **Understanding path**: image → SigLIP → aligner → merged with text embeddings → LLM → text output
+- **Generation path**: text → LLM embeddings → gen_embed/gen_aligner → gen_head → 576 VQ token logits (16384-way classification)
+
+### Data Flow
+- `StreamingDatasetWrapper` — On-the-fly image loading from URLs
+- `collate_fn()` — Understanding batches (tokenize Q&A, create image masks)
+- `collate_fn_generation()` — Generation batches (VQ-encode images to 576 tokens, create gen_token_mask)
+- `collate_fn_both()` — Routes samples to the appropriate collator based on field presence
+
+### Trainable Parameter Strategy
+
+| Component | Understanding | Generation/Both |
+|-----------|:---:|:---:|
+| Language Model (Llama) | **LoRA** | **LoRA** |
+| gen_head, gen_embed, gen_aligner | Frozen | **Trainable** |
+| vision_model, aligner, VQ-VAE | Frozen | Frozen |
+
+### Checkpoints
 ```
-Image → SigLIP Vision Encoder → MLP Aligner/Projector → [merged with text embeddings] → LLaMA Language Model → Output
+checkpoints/<run_name>/
+├── adapter_config.json / adapter_model.safetensors  # LoRA weights
+├── gen_components.pt                                 # gen_head + gen_embed + gen_aligner (generation/both only)
+└── final_model/
 ```
 
-### Key Classes
+### Validation
+`ValidationCallback` runs at `--log_freq` step intervals:
+- Understanding: evaluates accuracy on val split, logs predictions to WandB
+- Generation: autoregressively generates images from 4 fixed prompts, logs to WandB
 
-- **`MultiModalityCausalLM`** (`janus/models/modeling_vlm.py`): Base model combining vision encoder, aligner, and LLaMA language model. Registered as `MultiModalityCausalLM` in HF AutoModel.
-- **`EnhancedMultiModalModel`** (`train_counting.py`, `train_points.py`): Subclass adding a `forward()` method that replaces text token embeddings at image positions with vision-aligned features via `image_token_masks`. Each training script has its own copy.
-- **`VLChatProcessor`** (`janus/models/processing_vlm.py`): Handles conversation formatting and batch tokenization via `batchify()`.
-- **`StreamingDatasetWrapper`** (`train_counting.py`): Wraps HF datasets to download images on-the-fly from URLs, with fallback to random sampling on failure.
-- **`ValidationCallback`** (`train_counting.py`): HF Trainer callback for periodic validation, logs accuracy/samples to WandB and saves checkpoints.
-
-### Training Data Flow
-
-1. `collate_fn` formats each sample as a conversation (`<User>` with `<image_placeholder>` + question, `<Assistant>` with answer)
-2. `VLChatProcessor.batchify()` tokenizes and produces `input_ids`, `pixel_values`, `image_token_masks`
-3. Labels are masked so loss is computed only on assistant response tokens (everything before the assistant split point gets `label = -100`)
-
-### LoRA Configuration
-
-Target modules: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `up_proj`, `down_proj`, `gate_proj`. Applied to the language model only. Scripts test ranks of 4, 16, and 128.
-
-### Fine-tuning Modes
-
-- `transformer_lora`: LoRA on language model transformer layers (primary mode)
-- `transformer`: Full fine-tune of language model, freeze vision
-- `transformer_ONLY`: Fine-tune transformer, freeze everything else
-- `full`: Fine-tune entire model
-
-## Project Layout
-
-- `train_counting.py` / `train_points.py` — Main training entry points for counting and pointing tasks
-- `janus/models/` — Model architecture (vision encoder, projector, multimodal model, processor)
-- `janus/utils/` — Conversation templates and image I/O
-- `script/` — Training launch scripts with hyperparameter configurations
-- `analysis/` — Dataset analysis scripts and visualizations
-- `checkpoints/` — Saved model checkpoints (gitignored)
-- `transformers/` — Vendored Hugging Face transformers fork
-- `default_config.yaml` — Accelerate config (multi-GPU, bf16 mixed precision)
+## Key Arguments (`train_counting.py`)
+- `--task {counting,pointing,generation,both}` — Task mode
+- `--tuning_mode {transformer_lora,transformer,full}` — What to train
+- `--lora_r` / `--lora_alpha` — LoRA rank and scaling (defaults: 16, 32)
+- `--data_path` — Understanding dataset path
+- `--gen_data_path` — Generation dataset path (HF dataset or local)
+- `--gen_img_size` — VQ encoding image size (default: 384)
 
 ## Notes
-
-- Comments in the codebase are primarily in Korean
-- Hardware requirement: ~32GB GPU VRAM minimum for 7B model fine-tuning
-- The `janus/__init__.py` patches `collections` module for Python 3.10+ compatibility
+- GPU VRAM: 32GB+ recommended
+- Training uses bf16 (falls back to fp16)
+- `ddp_find_unused_parameters=True` is required for generation/both tasks
+- Generation dataset samples need `image` + one of `text`/`caption`/`prompt` fields
+- Understanding dataset samples need `image` + `question_count`/`question` + answer fields
+- Project language: comments and docs are mixed Korean/English

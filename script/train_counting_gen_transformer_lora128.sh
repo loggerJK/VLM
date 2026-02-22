@@ -1,24 +1,23 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# Janus-Pro-7B Training Script (counting / generation / both)
+# Janus-Pro-7B Generation Training Script
 # -----------------------------------------------------------------------------
 # Usage:
-#   bash script/train_counting_transformer_lora128.sh counting
-#   bash script/train_counting_transformer_lora128.sh generation
-#   bash script/train_counting_transformer_lora128.sh both
-#   bash script/train_counting_transformer_lora128.sh both ./checkpoints/.../step-500  # resume
+#   bash script/train_counting_gen_transformer_lora128.sh
+#   bash script/train_counting_gen_transformer_lora128.sh ./checkpoints/.../step-500  # resume
 # -----------------------------------------------------------------------------
 
 # [설정] Task & Resume (스크립트 인자)
-TASK="${1:-counting}"
-RESUME_CKPT="${2:-}"
+TASK="generation"
+RESUME_CKPT="${1:-}"
 
 # [설정] WandB API Key (.env 파일에서 로드)
 source ./.env
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=4,5
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
-export WANDB_NAME="train[transformer_lora128]_task[${TASK}]_dset[heez_pixmo_point_count]"
+export WANDB_NAME="train[transformer_lora128]_task[generation]_dset[heez_pixmo_point_count]"
 
 # [설정] 사전 학습된 Janus 모델 경로
 MODEL_PATH="deepseek-ai/Janus-Pro-7B"
@@ -31,13 +30,14 @@ TUNING_MODE="transformer_lora"      # 'lora' 또는 'full'
 LORA_R=128                     # LoRA Rank (TUNING_MODE가 'lora'일 때만 사용)
 LORA_ALPHA=32                # LoRA Alpha (TUNING_MODE가 'lora'일 때만 사용)
 BATCH_SIZE=1         # Device당 배치 사이즈
-EPOCHS=100000000
+EPOCHS=100
 LR=4e-5
 GRAD_ACCUM_STEPS=$((128 / NUM_GPUS))     # Gradient Accumulation Steps, Total 128
 USE_GRAD_CHECKPOINT=0  # 1=True, 0=False (메모리 절약)
 NUM_WORKERS=32          # Dataloader Workers
 SAVE_STEPS=500           # 매 n 스텝마다 체크포인트 저장
-LOG_FREQ=250             # 매 n 스텝마다 Validation
+LOG_FREQ=10             # 매 n 스텝마다 Validation
+USE_8BIT_ADAM=1          # 1=8bit AdamW (bitsandbytes), 0=기본 AdamW
 
 # WandB 로그인
 if [ -n "$WANDB_API_KEY" ]; then
@@ -58,15 +58,12 @@ else
 fi
 
 # Task별 인자 구성
-TASK_ARGS="--task $TASK"
-if [ "$TASK" = "counting" ] || [ "$TASK" = "both" ]; then
-    TASK_ARGS="$TASK_ARGS --data_path $DATA_PATH"
-fi
-if [ "$TASK" = "generation" ] || [ "$TASK" = "both" ]; then
-    TASK_ARGS="$TASK_ARGS --gen_data_path $GEN_DATA_PATH"
-fi
+TASK_ARGS="--task $TASK --gen_data_path $GEN_DATA_PATH --gen_img_size 384"
 if [ -n "$RESUME_CKPT" ]; then
     TASK_ARGS="$TASK_ARGS --resume_checkpoint $RESUME_CKPT"
+fi
+if [ "$USE_8BIT_ADAM" -eq 1 ]; then
+    TASK_ARGS="$TASK_ARGS --use_8bit_adam"
 fi
 
 echo "================================================================"
@@ -105,4 +102,5 @@ $LAUNCH_CMD train_counting.py \
     --log_freq "$LOG_FREQ" \
     --lora_r "$LORA_R" \
     --lora_alpha "$LORA_ALPHA" \
+    --run_name "$WANDB_NAME" \
     $TASK_ARGS

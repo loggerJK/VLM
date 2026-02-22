@@ -1339,7 +1339,8 @@ class Trainer:
 
         if is_sagemaker_mp_enabled():
             self.optimizer = smp.DistributedOptimizer(self.optimizer)
-
+        
+        print(f"Optimizer : {self.optimizer.__class__.__name__}")
         return self.optimizer
 
     def get_num_trainable_parameters(self):
@@ -1838,6 +1839,11 @@ class Trainer:
             optimizer_kwargs.update(stable_adamw_kwargs)
         else:
             raise ValueError(f"Trainer cannot instantiate unsupported optimizer: {args.optim}")
+        
+        # Print for rank 0 only
+        print(f"args.optim : {args.optim}")
+        print(f"Optimizer Class : {optimizer_cls.__name__}")
+        print(f"Optimizer kwargs : {optimizer_kwargs}")
         return optimizer_cls, optimizer_kwargs
 
     def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):

@@ -13,9 +13,12 @@ from janus.models import MultiModalityCausalLM, VLChatProcessor
 from janus.utils.io import load_pil_images
 from PIL import Image
 import numpy as np
+import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from tqdm import tqdm
 import wandb
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from tqdm import tqdm
 
 
 def extract_number(text):
@@ -27,6 +30,22 @@ def extract_number(text):
     if match:
         return int(match.group(1))
     return -1
+
+def encode_image_to_vq_tokens(vq_model, image, img_size=384):
+    """PIL Image -> 576 VQ token IDs (LongTensor)"""
+    image = image.resize((img_size, img_size))
+    image_tensor = torch.from_numpy(np.array(image)).float() / 255.0
+    image_tensor = image_tensor * 2 - 1  # [0,1] -> [-1,1]
+    image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0)  # [1, 3, H, W]
+
+    device = next(vq_model.parameters()).device
+    dtype = next(vq_model.parameters()).dtype
+
+    with torch.no_grad():
+        _, _, (_, _, indices) = vq_model.encode(image_tensor.to(device=device, dtype=dtype))
+
+    return indices.view(-1)  # LongTensor [576]
+
 
 class EnhancedMultiModalModel(MultiModalityCausalLM):
     """
@@ -41,11 +60,17 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
         pixel_values: torch.FloatTensor = None,
         image_token_masks: torch.BoolTensor = None,
         labels: torch.LongTensor = None,
+        gen_token_mask: torch.BoolTensor = None,
         **kwargs,
     ):
         """
-        이미지와 텍스트의联合 처리를 지원하는 forward 메서드.
+        이미지와 텍스트의 처리를 지원하는 forward 메서드.
+        gen_token_mask가 있으면 generation forward, 없으면 understanding forward.
         """
+        if gen_token_mask is not None and gen_token_mask.any():
+            # === GENERATION forward ===
+            return self._forward_generation(input_ids, attention_mask, labels, gen_token_mask)
+
         if pixel_values is not None and image_token_masks is not None:
             # 멀티모달 입력 처리 (텍스트 임베딩 일부를 이미지 임베딩으로 교체)
             inputs_embeds = self._process_multimodal_inputs(
@@ -59,7 +84,7 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
 
         # 이미 inputs_embeds를 계산했으므로 input_ids는 제거 (중복 방지)
         kwargs.pop("inputs_embeds", None)
-        
+
         # 실제 언어 모델 호출
         outputs = self.language_model(
             input_ids=None,
@@ -69,6 +94,49 @@ class EnhancedMultiModalModel(MultiModalityCausalLM):
             **kwargs,
         )
         return outputs
+
+    def _forward_generation(self, input_ids, attention_mask, labels, gen_token_mask):
+        """Image generation forward: text -> LLM -> gen_head -> VQ logits"""
+        # 1) Base text embedding
+        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+        # 2) Image token 위치는 gen_embed + gen_aligner로 교체
+        #    (teacher forcing: GT VQ token IDs를 입력으로 사용)
+        image_token_ids = input_ids[gen_token_mask]
+        image_embeds = self.prepare_gen_img_embeds(image_token_ids)
+        inputs_embeds = inputs_embeds.clone()
+        inputs_embeds[gen_token_mask] = image_embeds.to(inputs_embeds.dtype)
+
+        # 3) LLM forward (hidden states만 필요 — lm_head 스킵)
+        #    PeftModel 구조: language_model.model → LlamaForCausalLM → .model → LlamaModel
+        #    Non-LoRA 구조: language_model.model → LlamaModel
+        lm = self.language_model
+        # PeftModel이면 한 단계 더 진입
+        if hasattr(lm, 'model') and hasattr(lm.model, 'model'):
+            lm_model = lm.model.model  # LlamaModel (BaseModelOutput with last_hidden_state)
+        elif hasattr(lm, 'model'):
+            lm_model = lm.model        # LlamaModel
+        else:
+            lm_model = lm.base_model
+        outputs = lm_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+        )
+        hidden_states = outputs.last_hidden_state  # [batch, seq, hidden_dim]
+
+        # 4) gen_head로 image logits 생성
+        gen_logits = self.gen_head(hidden_states)  # [batch, seq, 16384]
+
+        # 5) Shifted cross-entropy loss (next-token prediction)
+        shift_logits = gen_logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+        return CausalLMOutputWithPast(loss=loss, logits=gen_logits)
 
     def _process_multimodal_inputs(
         self,
@@ -189,9 +257,6 @@ def collate_fn(batch, processor, task="counting"):
         ]
         
         try:
-            # print("="*50)
-            # print(f"q_col: {q_col}, a_col: {a_col}")
-            # print(f"Processing sample with question: {item[q_col]} and answer: {item[a_col]}")
             prepare = processor(
                 conversations=conversation,
                 images=[image],
@@ -243,6 +308,227 @@ def collate_fn(batch, processor, task="counting"):
 
     return inputs_dict
 
+def collate_fn_generation(batch, processor, vq_model, img_size=384):
+    """
+    Text-to-image 학습용 collate.
+    각 샘플: {text, image} -> 시퀀스 구성:
+    [text_prompt_tokens] [assistant] [boi] [vq_tok_0..575] [eoi]
+    """
+    boi_id = processor.image_start_id    # <begin_of_image>
+    eoi_id = processor.image_end_id      # <end_of_image>
+
+    input_ids_list, labels_list, gen_token_mask_list = [], [], []
+
+    for item in batch:
+        image = item.get('image')
+        # TODO: 'descriptions' 가져와야 하는 것 아닌지?
+        text = item.get('text') or item.get('caption') or item.get('prompt')
+        if image is None or text is None:
+            continue
+
+        # 1) VQ encode
+        try:
+            vq_tokens = encode_image_to_vq_tokens(vq_model, image, img_size=img_size)  # [576]
+        except Exception as e:
+            print(f"Error encoding image: {e}")
+            continue
+
+        # 2) Text prompt 토큰화
+        conversation = [
+            {"role": "<|User|>", "content": text},
+            {"role": "<|Assistant|>", "content": ""},
+        ]
+        sft_format = processor.apply_sft_template_for_multi_turn_prompts(
+            conversations=conversation,
+            sft_format=processor.sft_format,
+            system_prompt="",
+        )
+        text_ids = processor.tokenizer.encode(sft_format)  # List[int]
+
+        # 3) 시퀀스 구성: [text] [boi] [vq_tok_0..575] [eoi]
+        full_ids = text_ids + [boi_id] + vq_tokens.tolist() + [eoi_id]
+        full_ids = torch.LongTensor(full_ids)
+
+        # 4) Labels: text+boi 부분은 -100, VQ image tokens만 loss 계산 (eoi 제외)
+        labels = torch.full_like(full_ids, -100)
+        img_start = len(text_ids) + 1  # boi 다음부터
+        num_vq = len(vq_tokens)
+        labels[img_start:img_start + num_vq] = full_ids[img_start:img_start + num_vq]
+
+        # 5) Gen token mask: image token 위치 표시 (boi, eoi 제외, VQ tokens만)
+        num_vq_tokens = len(vq_tokens)
+        gen_mask = torch.zeros(len(full_ids), dtype=torch.bool)
+        gen_mask[img_start:img_start + num_vq_tokens] = True
+
+        input_ids_list.append(full_ids)
+        labels_list.append(labels)
+        gen_token_mask_list.append(gen_mask)
+
+    if not input_ids_list:
+        return {}
+
+    # Left-padding: autoregressive 모델에서 마지막 토큰 위치가 중요하므로 실제 콘텐츠를 오른쪽 정렬.
+    # F.pad(x, (left, right), value) 로 왼쪽에 max_len - len(x) 만큼 패딩.
+    #
+    # 예시) 배치 내 길이 7, 길이 5 시퀀스 (max_len=7):
+    #   원본 시퀀스:    [text, text, boi, vq0, vq1, vq2, eoi]   (len=7)
+    #                  [text, boi, vq0, vq1, eoi]                (len=5)
+    #
+    #   input_ids:      [text, text, boi, vq0, vq1, vq2, eoi]
+    #                   [PAD,  PAD, text, boi, vq0, vq1, eoi]
+    #   labels:         [-100, -100, -100, vq0, vq1, vq2, -100]
+    #                   [-100, -100, -100, -100, vq0, vq1, -100]
+    #   attention_mask: [1,    1,    1,    1,   1,   1,   1   ]
+    #                   [0,    0,    1,    1,   1,   1,   1   ]
+    #   gen_token_mask: [F,    F,    F,    T,   T,   T,   F   ]
+    #                   [F,    F,    F,    F,   T,   T,   F   ]
+    max_len = max(len(ids) for ids in input_ids_list)
+    pad_id = processor.pad_id
+
+    batched = {
+        # 토큰 ID: 패딩 위치는 pad_id로 채움
+        'input_ids': torch.stack([F.pad(ids, (max_len - len(ids), 0), value=pad_id) for ids in input_ids_list]),
+        # Loss 대상: -100은 CrossEntropyLoss에서 무시됨, VQ 이미지 토큰 위치만 실제 값
+        'labels': torch.stack([F.pad(lb, (max_len - len(lb), 0), value=-100) for lb in labels_list]),
+        # 실제 토큰=1, 패딩=0: 모델이 패딩 위치를 attend하지 않도록 마스킹
+        'attention_mask': torch.stack([F.pad(torch.ones(len(ids), dtype=torch.long), (max_len - len(ids), 0), value=0) for ids in input_ids_list]),
+        # VQ 이미지 토큰 위치=True: _forward_generation에서 해당 위치의 embedding을 이미지 embedding으로 교체
+        'gen_token_mask': torch.stack([F.pad(m, (max_len - len(m), 0), value=False) for m in gen_token_mask_list]),
+    }
+    return batched
+
+@torch.no_grad()
+def generate_image_from_prompt(
+    model: MultiModalityCausalLM,
+    processor: VLChatProcessor,
+    prompt_text: str,
+    temperature: float = 1.0,
+    cfg_weight: float = 5.0,
+    image_token_num_per_image: int = 576,
+    img_size: int = 384,
+    patch_size: int = 16,
+):
+    """
+    공식 Janus T2I 로직 기반 이미지 생성 (generation_inference.py 참조).
+    CFG (classifier-free guidance) + temperature sampling + KV cache 사용.
+    LoRA/PeftModel 호환.
+
+    Returns:
+        PIL.Image
+    """
+    device = next(model.parameters()).device
+
+    # 1) Prompt → token IDs
+    conversation = [
+        {"role": "<|User|>", "content": prompt_text},
+        {"role": "<|Assistant|>", "content": ""},
+    ]
+    sft_format = processor.apply_sft_template_for_multi_turn_prompts(
+        conversations=conversation,
+        sft_format=processor.sft_format,
+        system_prompt="",
+    )
+    prompt = sft_format + processor.image_start_tag
+    input_ids = processor.tokenizer.encode(prompt)
+    input_ids = torch.LongTensor(input_ids)
+
+    # 2) CFG용 dual batch: [conditional, unconditional]
+    #    unconditional = 중간 토큰을 pad로 교체 (공식 구현과 동일)
+    tokens = torch.zeros((2, len(input_ids)), dtype=torch.int, device=device)
+    tokens[0, :] = input_ids  # conditional
+    tokens[1, :] = input_ids  # unconditional
+    tokens[1, 1:-1] = processor.pad_id
+
+    inputs_embeds = model.language_model.get_input_embeddings()(tokens)
+
+    # 3) LLM backbone 접근 (LoRA/PeftModel 호환)
+    lm = model.language_model
+    if hasattr(lm, 'model') and hasattr(lm.model, 'model'):
+        lm_model = lm.model.model  # PeftModel → LlamaForCausalLM → LlamaModel
+    elif hasattr(lm, 'model'):
+        lm_model = lm.model
+    else:
+        lm_model = lm.base_model
+
+    # 4) Autoregressive generation with CFG + KV cache
+    generated_tokens = torch.zeros((1, image_token_num_per_image), dtype=torch.int, device=device)
+    past_key_values = None
+
+    for i in tqdm(range(image_token_num_per_image), total=image_token_num_per_image, desc="Generating image tokens"):
+        outputs = lm_model(
+            inputs_embeds=inputs_embeds,
+            use_cache=True,
+            past_key_values=past_key_values,
+        )
+        past_key_values = outputs.past_key_values
+        hidden_states = outputs.last_hidden_state
+
+        logits = model.gen_head(hidden_states[:, -1, :])
+        logit_cond = logits[0:1, :]
+        logit_uncond = logits[1:2, :]
+
+        # CFG: logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+        logits_cfg = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+        probs = torch.softmax(logits_cfg / temperature, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)  # [1, 1]
+
+        generated_tokens[:, i] = next_token.squeeze(-1)
+
+        # Next step input: same token for both cond & uncond
+        next_token_pair = next_token.repeat(2, 1).squeeze(-1)  # [2]
+        img_embeds = model.prepare_gen_img_embeds(next_token_pair)
+        inputs_embeds = img_embeds.unsqueeze(1)  # [2, 1, D]
+
+    # 5) Decode VQ tokens → image
+    spatial_size = img_size // patch_size
+    dec = model.gen_vision_model.decode_code(
+        generated_tokens, shape=[1, 8, spatial_size, spatial_size]
+    )
+    dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+    dec = np.clip((dec + 1) / 2 * 255, 0, 255)
+    return Image.fromarray(dec[0].astype(np.uint8))
+
+
+def collate_fn_both(batch, processor, vq_model, task="counting", img_size=384):
+    """
+    Multi-task collate: understanding과 generation 샘플을 자동 분기.
+    generation 샘플: 'text'/'caption'/'prompt' 필드 존재 + 'question_count'/'question' 없음
+    understanding 샘플: 'question_count'/'question' 필드 존재
+    """
+    und_batch = []
+    gen_batch = []
+
+    for item in batch:
+        # Generation 샘플 우선 판별 (같은 데이터셋에서 분리 시 gen에도 und 키가 존재할 수 있음)
+        has_gen_keys = any(k in item and item[k] is not None for k in ['text', 'caption', 'prompt'])
+        has_und_keys = any(k in item and item[k] is not None for k in ['question_count', 'question'])
+        if has_gen_keys and not has_und_keys:
+            gen_batch.append(item)
+        elif has_und_keys and not has_gen_keys:
+            und_batch.append(item)
+        elif has_gen_keys:
+            # 양쪽 키 모두 있으면 descriptions 유무로 판별
+            if item.get('descriptions') is not None and item['descriptions'] != '' and item['descriptions'] != []:
+                gen_batch.append(item)
+            else:
+                und_batch.append(item)
+        # 키가 전혀 없으면 스킵
+
+    if und_batch and gen_batch:
+        raise ValueError(
+            f"Mixed batch detected: {len(und_batch)} und + {len(gen_batch)} gen samples. "
+            f"Use batch_size=1 for 'both' task, or separate datasets."
+        )
+
+    # Understanding 배치 처리
+    if und_batch:
+        return collate_fn(und_batch, processor, task=task)
+    # Generation 배치 처리
+    if gen_batch:
+        return collate_fn_generation(gen_batch, processor, vq_model, img_size=img_size)
+
+    return {}
+
 class ValidationCallback(TrainerCallback):
     def __init__(self, processor, eval_dataset, args, log_freq=500):
         self.processor = processor
@@ -259,14 +545,35 @@ class ValidationCallback(TrainerCallback):
             for name in optimized_param_names:
                 f.write(f"{name}\n")
         if wandb.run is not None:
-            wandb.config.update({"optimized_param_names": optimized_param_names})    
-        
+            wandb.config.update({"optimized_param_names": optimized_param_names})
+
+    def _setup_validation_prompts(self):
+        """val_gen split에서 generation validation 프롬프트 추출 (BAGEL/Lumina 동일 방식)"""
+        import random
+        rng = random.Random(42)
+
+        val_ds = load_dataset("heez/pixmo-point-count-gen-und", split="val_gen")
+        num_prompts = 5
+        indices = rng.sample(range(len(val_ds)), min(num_prompts, len(val_ds)))
+
+        self.validation_prompts = []
+        for idx in indices:
+            item = val_ds[idx]
+            caption = item.get('descriptions', "Generate an image.")
+            if isinstance(caption, list):
+                caption = caption[0]
+            self.validation_prompts.append(caption)
+
+        print(f"[Validation] Selected {len(self.validation_prompts)} generation prompts from val_gen:")
+        for i, p in enumerate(self.validation_prompts):
+            print(f"  {i+1}. {p}")
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
-        if state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
+        if state.global_step > 0 and state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
+        # if state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
             checkpoint_dir = os.path.join(self.args.output_dir, f"epoch{int(state.epoch)}_step-{state.global_step}")
             os.makedirs(checkpoint_dir, exist_ok=True)
-            
+
             if self.args.tuning_mode == "transformer_lora":
                 if self.trainer.is_world_process_zero:
                     print(f"\n[Step {state.global_step}] Saving checkpoint to {checkpoint_dir}")
@@ -277,9 +584,13 @@ class ValidationCallback(TrainerCallback):
                 self.trainer.save_model(checkpoint_dir)
                 if self.trainer.is_world_process_zero:
                     self.processor.save_pretrained(checkpoint_dir)
-                    
-        if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
-            self.validate(model, state)
+
+        if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
+        # if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
+            if self.args.task in ["counting", "pointing", "both"]:
+                self.validate(model, state)
+            if self.args.task in ["generation", "both"]:
+                self.validate_generation(model, state)
 
     def on_epoch_end(self, args, state, control, model=None, **kwargs):
         if state.is_world_process_zero:
@@ -409,6 +720,42 @@ class ValidationCallback(TrainerCallback):
         
         model.train()
 
+    def validate_generation(self, model, state):
+        """텍스트 프롬프트로 이미지 생성하여 wandb에 로깅 (공식 Janus T2I 로직 사용)"""
+        print(f"\n[Step {state.global_step}] Running Generation Validation...")
+        model.eval()
+
+        unwrap_model = model.module if hasattr(model, "module") else model
+
+        if not hasattr(self, 'validation_prompts'):
+            self._setup_validation_prompts()
+        prompts = self.validation_prompts
+
+        gen_images = []
+        for prompt_text in prompts:
+            try:
+                pil_img = generate_image_from_prompt(
+                    model=unwrap_model,
+                    processor=self.processor,
+                    prompt_text=prompt_text,
+                    temperature=1.0,
+                    cfg_weight=5.0,
+                    img_size=self.args.gen_img_size,
+                )
+                gen_images.append(wandb.Image(pil_img, caption=prompt_text[:80]))
+            except Exception as e:
+                print(f"  Generation validation error: {e}")
+                continue
+
+        if wandb.run is not None and gen_images:
+            wandb.log({
+                "val/generated_images": gen_images,
+                "global_step": state.global_step,
+            })
+            print(f"  Logged {len(gen_images)} generated images to wandb")
+
+        model.train()
+
 def main():
     parser = argparse.ArgumentParser(description="Train Janus model for counting task")
     parser.add_argument("--tuning_mode", type=str, default="lora", help="Tuning mode: 'full' or 'lora'")
@@ -425,29 +772,105 @@ def main():
     parser.add_argument("--log_freq", type=int, default=500, help="Log validation every n steps")
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank (if tuning_mode is 'lora')")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (if tuning_mode is 'lora')")
-    parser.add_argument("--task", type=str, default="counting", choices=["pointing", "counting"],
-                        help="Task type: 'pointing' (question/answer) or 'counting' (question_count/answer_count)")
+    parser.add_argument("--task", type=str, default="counting",
+                        choices=["counting", "pointing", "generation", "both"],
+                        help="Task: counting/pointing (understanding), generation (T2I), both (multi-task)")
+    parser.add_argument("--gen_data_path", type=str, default=None,
+                        help="HuggingFace dataset name or local path for generation data (text+image pairs)")
+    parser.add_argument("--gen_img_size", type=int, default=384, help="Image size for VQ encoding")
+    parser.add_argument("--max_steps", type=int, default=-1, help="Max training steps (-1 for unlimited)")
+    parser.add_argument("--resume_checkpoint", type=str, default=None,
+                        help="Path to checkpoint directory to resume from (loads LoRA + gen_components)")
+    parser.add_argument("--use_8bit_adam", action="store_true",
+                        help="Use bitsandbytes 8-bit AdamW optimizer to save memory")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="WandB run name (defaults to output_dir if not set)")
     args = parser.parse_args()
 
-    os.environ["WANDB_PROJECT"] = "janus-counting-finetune"
-    
-    if not os.path.exists(args.data_path):
-        raw_dataset = load_dataset(args.data_path, split="train")
-    else :
-        raw_dataset = load_from_disk(args.data_path)
-        
-        
-    if args.task == "counting":
-        print("[INFO] =========== Filtering dataset for counting task... ===========")
-        q_col, a_col = 'question_count', 'answer_count'
-        # Flitering out samples 
-        raw_dataset = raw_dataset.filter(
-            lambda q_col_val, a_col_val: q_col_val is not None and a_col_val is not None,
-            num_proc=64,
-            input_columns=[q_col, a_col],
+    os.environ["WANDB_PROJECT"] = "janus-counting"
+
+    # Validate args
+    if args.task in ["generation", "both"] and args.gen_data_path is None:
+        raise ValueError("--gen_data_path is required for generation/both task")
+
+    # Helper: load a HF or local dataset
+    def _load_raw_dataset(path, split="train"):
+        if not os.path.exists(path):
+            return load_dataset(path, split=split, num_proc=64)
+        else:
+            return load_from_disk(path)
+
+    # Helper: check if dataset has 'descriptions' column for filtering
+    def _has_descriptions_column(ds):
+        return 'descriptions' in ds.column_names
+
+    # Helper: filter generation samples (descriptions is not None/empty)
+    def _filter_gen(ds):
+        print(f"Filtering generation samples from dataset with {len(ds)} samples")
+        return ds.filter(
+            lambda descriptions: descriptions is not None and descriptions != '' and descriptions != [],
+            input_columns=['descriptions'], num_proc=64
         )
-        
-    train_dataset = StreamingDatasetWrapper(raw_dataset)
+
+    # Helper: filter understanding samples (descriptions is None/empty)
+    def _filter_und(ds):
+        print(f"Filtering understanding samples from dataset with {len(ds)} samples")
+        return ds.filter(
+            lambda descriptions: descriptions is None or descriptions == '' or descriptions == [],
+            input_columns=['descriptions'], num_proc=64
+        )
+
+    # Helper: map descriptions[0] -> text field for collate_fn_generation compatibility
+    def _map_descriptions_to_text(ds):
+        print(f"Mapping 'descriptions' to 'text' for generation dataset with {len(ds)} samples")
+        def _to_text(descriptions):
+            return {
+                "text": descriptions[0] if isinstance(descriptions, list) else descriptions
+            }
+
+        return ds.map(
+            _to_text,
+            input_columns=["descriptions"],
+            num_proc=64,
+        )
+
+    # Helper: wrap dataset (use StreamingDatasetWrapper only if images need downloading)
+    def _maybe_wrap(ds):
+        sample = ds[0]
+        if 'image' in sample and sample['image'] is not None:
+            return ds  # map-style dataset with images already loaded
+        return StreamingDatasetWrapper(ds)
+
+    # Load datasets based on task
+    if args.task in ["counting", "pointing"]:
+        raw_dataset = _load_raw_dataset(args.data_path)
+        if _has_descriptions_column(raw_dataset):
+            raw_dataset = _filter_und(raw_dataset)
+            print(f"[INFO] Filtered understanding samples: {len(raw_dataset)}")
+        train_dataset = _maybe_wrap(raw_dataset)
+    elif args.task == "generation":
+        gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
+        if _has_descriptions_column(gen_raw_dataset):
+            gen_raw_dataset = _filter_gen(gen_raw_dataset)
+            gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
+            print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
+        train_dataset = _maybe_wrap(gen_raw_dataset)
+    elif args.task == "both":
+        from torch.utils.data import ConcatDataset
+        # Understanding dataset
+        und_raw_dataset = _load_raw_dataset(args.data_path)
+        if _has_descriptions_column(und_raw_dataset):
+            und_raw_dataset = _filter_und(und_raw_dataset)
+            print(f"[INFO] Filtered understanding samples: {len(und_raw_dataset)}")
+        # Generation dataset
+        gen_raw_dataset = _load_raw_dataset(args.gen_data_path)
+        if _has_descriptions_column(gen_raw_dataset):
+            gen_raw_dataset = _filter_gen(gen_raw_dataset)
+            gen_raw_dataset = _map_descriptions_to_text(gen_raw_dataset)
+            print(f"[INFO] Filtered generation samples: {len(gen_raw_dataset)}")
+        und_dataset = _maybe_wrap(und_raw_dataset)
+        gen_dataset = _maybe_wrap(gen_raw_dataset)
+        train_dataset = ConcatDataset([und_dataset, gen_dataset])
     
     print(f"Loading model from {args.model_path}...")
     processor = VLChatProcessor.from_pretrained(args.model_path)
@@ -465,11 +888,15 @@ def main():
         torch_dtype=torch_dtype
     )
     
+    # Determine resume path: CLI arg takes priority, then env var
+    resume_path = args.resume_checkpoint or os.getenv("RESUME_CHECKPOINT_PATH")
+
     if args.tuning_mode == "transformer_lora":
-        if os.environ.get("WANDB_RUN_ID") is None:
+        for param in model.parameters():
+            param.requires_grad = False
+
+        if resume_path is None:
             print(f"[INFO] Transformer LoRA (tuning with r={args.lora_r}, alpha={args.lora_alpha})...")
-            for param in model.parameters():
-                param.requires_grad = False
             lora_config = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
@@ -478,25 +905,19 @@ def main():
                 bias="none",
                 task_type=TaskType.CAUSAL_LM
             )
-            # model = get_peft_model(model, lora_config)
             model.language_model = get_peft_model(model.language_model, lora_config)
             model.language_model.print_trainable_parameters()
         else:
-            print(f"[INFO] Resuming Transformer LoRA (with r={args.lora_r}, alpha={args.lora_alpha}) from checkpoint...")
-            for param in model.parameters():
-                param.requires_grad = False
-            checkpoint_dir = os.getenv("RESUME_CHECKPOINT_PATH")
-            if checkpoint_dir is None:
-                raise ValueError("RESUME_CHECKPOINT_PATH environment variable must be set to resume from a checkpoint.")
+            print(f"[INFO] Resuming Transformer LoRA (with r={args.lora_r}, alpha={args.lora_alpha}) from checkpoint: {resume_path}")
             model.language_model = PeftModel.from_pretrained(
                 model.language_model,
-                checkpoint_dir,
+                resume_path,
                 torch_dtype=torch_dtype,
             )
             for name, param in model.language_model.named_parameters():
                 if 'lora' in name:
                     param.requires_grad = True
-            print(f"[INFO] Loaded LoRA adapter from checkpoint : {checkpoint_dir}.")
+            print(f"[INFO] Loaded LoRA adapter from checkpoint: {resume_path}")
             model.language_model.print_trainable_parameters()
     elif args.tuning_mode == "transformer":
         print("[INFO] Transformer fine-tuning...")
@@ -524,9 +945,6 @@ def main():
     else:
         raise ValueError(f"Unsupported tuning mode: {args.tuning_mode}")
 
-
-    
-    
     if args.gradient_checkpointing:
         print("Enabling Gradient Checkpointing...")
         model.gradient_checkpointing_enable()
@@ -534,19 +952,24 @@ def main():
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.lr,
+        # optim="adamw_bnb_8bit"  if args.use_8bit_adam else "adamw_torch",
+        optim="adamw_bnb_8bit", # if args.use_8bit_adam else "adamw_torch",
+        # optim="adamw_torch",
         bf16=(torch_dtype == torch.bfloat16),
         fp16=(torch_dtype == torch.float16),
         logging_steps=1,
         save_strategy="no",
         eval_strategy="no",
+        run_name=args.run_name,
         report_to="wandb",
         remove_unused_columns=False,
         gradient_checkpointing=bool(args.gradient_checkpointing),
-        ddp_find_unused_parameters=False if args.gradient_checkpointing else None,
-        dataloader_num_workers=args.num_workers, 
+        ddp_find_unused_parameters=True if args.task in ["generation", "both"] else (False if args.gradient_checkpointing else None),
+        dataloader_num_workers=0 if args.task in ["generation", "both"] else args.num_workers,
         # split_batches=True,
         # dispatch_batches=False
         accelerator_config = {
@@ -555,10 +978,20 @@ def main():
         }
     )
     
-    def data_collator(batch):
-        return collate_fn(batch, processor, task=args.task)
-    
-    val_callback = ValidationCallback(processor, None, args, log_freq=args.log_freq) 
+    # Get VQ model reference for generation collate (frozen, on CPU initially)
+    vq_model_ref = model.gen_vision_model if args.task in ["generation", "both"] else None
+
+    if args.task in ["counting", "pointing"]:
+        def data_collator(batch):
+            return collate_fn(batch, processor, task=args.task)
+    elif args.task == "generation":
+        def data_collator(batch):
+            return collate_fn_generation(batch, processor, vq_model_ref, img_size=args.gen_img_size)
+    elif args.task == "both":
+        def data_collator(batch):
+            return collate_fn_both(batch, processor, vq_model_ref, task=args.task, img_size=args.gen_img_size)
+
+    val_callback = ValidationCallback(processor, None, args, log_freq=args.log_freq)
 
     trainer = Trainer(
         model=model,
@@ -569,13 +1002,15 @@ def main():
     )
     val_callback.trainer = trainer
     
-    resume_kwargs = {
-        'wandb_resume': os.getenv("WANDB_RESUME", "never"),
-        'wandb_resume_id': os.getenv("WANDB_RESUME_ID"),
-        'resume_global_step': int(os.getenv("RESUME_GLOBAL_STEP", "0")),
-        'resume_epoch': int(os.getenv("RESUME_EPOCH", "0")),
-    }
-    
+    resume_kwargs = {}
+    if os.getenv("WANDB_RESUME", "never") in ['allow', 'must']:
+        resume_kwargs = {
+            'wandb_resume': os.getenv("WANDB_RESUME"),
+            'wandb_resume_id': os.getenv("WANDB_RESUME_ID"),
+            'resume_global_step': int(os.getenv("RESUME_GLOBAL_STEP", "0")),
+            'resume_epoch': int(os.getenv("RESUME_EPOCH", "0")),
+        }
+
     print("Starting training...")
     trainer.train(**resume_kwargs)
     
@@ -589,8 +1024,7 @@ def main():
     else:
         # Save the full model
         trainer.save_model(final_output_dir)
-        
-        
+
     processor.save_pretrained(final_output_dir)
 
 if __name__ == "__main__":
