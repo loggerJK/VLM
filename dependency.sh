@@ -1,0 +1,1 @@
+sudo apt install wkhtmltopdf fonts-noto-cjk fonts-noto-cjk-extra

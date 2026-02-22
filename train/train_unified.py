@@ -55,6 +55,7 @@ import evaluate
 import nltk
 from nltk.translate.bleu_score import sentence_bleu
 
+from copy import deepcopy
 
 # ==============================================================================
 # 1. Special Tokens Global Definition
@@ -252,18 +253,21 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
         image = data_item.get('image')
         
         # Check key 'descriptions' first for understanding generation
-        
         caption = data_item.get('descriptions', None)
         if isinstance(caption, list):
             caption = caption[0]
         
         # Generation Data
         if caption is not None:
-            crop_size_list = generate_crop_size_list((self.gen_image_size // 32) ** 2, 32)
-            if task == 'ocr':
-                image = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
-            else:
-                image = var_center_crop(image, crop_size_list=crop_size_list)
+            if task == 'ocr_synthetic': # Generate synthetic OCR image HERE
+                answer = data_item.get('answer', '')
+                image = generate_ocr_image('# ' + answer, template="clean_light", width=self.gen_image_size, height=self.gen_image_size, quality=100)
+            else :
+                crop_size_list = generate_crop_size_list((self.gen_image_size // 32) ** 2, 32)
+                if task == 'ocr':
+                    image = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
+                else:
+                    image = var_center_crop(image, crop_size_list=crop_size_list)
             return (image, caption)
 
         # Understanding Data
@@ -1000,18 +1004,20 @@ class Solver(FinetuneSolverBase):
             },
             input_columns=['text'], num_proc=64
         )
-        # gen 데이터셋: answer를 descriptions로 매핑하여 생성
-        train_gen_ds = raw_dataset.map(
-            lambda text: {
+        # gen 데이터셋: 'answer' ->  'descriptions'로 매핑하여 생성
+        train_gen_ds = train_und_ds.map(
+            lambda answer: {
                 'descriptions':
                     f"A Mathpix Markdown format with sharp, legible black text. "
                     f"High-resolution typography, top-down view. "
                     f"The text is rendered in natural left-to-right, top-to-bottom reading order. "
                     f"The text reads:\n"
-                    f"{text}"
+                    f"{answer}"
             },
-            input_columns=['text'], num_proc=64
+            input_columns=['answer'], num_proc=64
         )
+        
+        # Gen Validation Dataset: test split에서 100개 샘플 선택
         raw_dataset_val = load_dataset("agentlans/high-quality-english-sentences", split="test")
         raw_dataset_val = raw_dataset_val.select(list(range(0, min(self.args.validation_samples, len(raw_dataset_val)))))
         self.val_ds = raw_dataset_val.map(
@@ -1020,7 +1026,7 @@ class Solver(FinetuneSolverBase):
                 'answer': text.replace("\n", " ").strip()[:120]
             },
             input_columns=['text'], num_proc=64
-        )
+        ) # Columns: 'text', 'descriptions', 'answer'
         
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='ocr_synthetic', mode=self.args.mode)
         
@@ -1423,6 +1429,9 @@ class Solver(FinetuneSolverBase):
             answer_gt = item.get('answer', "")
 
             if self.args.task == 'ocr_synthetic':
+                answer_input_ids = self.tokenizer(answer_gt, add_special_tokens=False)['input_ids']
+                answer_template = deepcopy(answer_input_ids)  # copy answer_input_ids
+                answer_template[1:] = [MASK] * (len(answer_template) - 1)  # Mask all but first token
                 image_processed = generate_ocr_image('# ' + answer_gt, template="clean_light", width=self.args.und_image_size, height=self.args.und_image_size, quality=100)
             else:
                 image = item['image']
@@ -1439,10 +1448,16 @@ class Solver(FinetuneSolverBase):
             input_ids_raw = self.tokenizer(instruction)['input_ids']
             input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
             code_start = len(input_token) + 1
-            STEPS_LENGTH = 128
-            GEN_LENGTH = 512 if self.args.task == 'ocr' else 128
-            BLOCK_LENGTH = 128
-            input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+            if self.args.task == 'ocr_synthetic':
+                input_token = input_token + [BOA] + answer_template + [EOA]
+                STEPS_LENGTH = len(answer_template) 
+                GEN_LENGTH = len(answer_template)
+                BLOCK_LENGTH = len(answer_template)
+            else :
+                STEPS_LENGTH = 128
+                GEN_LENGTH = 512 if self.args.task == 'ocr' else 128
+                BLOCK_LENGTH = 128
+                input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
             input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
 
             out = generate_text_understanding(
@@ -1567,7 +1582,7 @@ class Solver(FinetuneSolverBase):
 
         if run_und and self.args.wandb_run_id is None:
             if self.args.task in ['ocr', 'ocr_synthetic']:
-                # self.validate_ocr(self.start_epoch)
+                self.validate_ocr(self.start_epoch)
                 pass
             else:
                 self.validate(self.start_epoch, format="counting", split="train")
@@ -1579,7 +1594,7 @@ class Solver(FinetuneSolverBase):
         if run_gen and self.args.wandb_run_id is None:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
-            # self.log_validation_images(self.global_step)
+            self.log_validation_images(self.global_step)
 
         self.logger.info(f"Start training for {self.args.epochs} epochs")
         start_time = time.time()

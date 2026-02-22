@@ -3,16 +3,8 @@ set -e
 
 # 사용할 GPU 지정 (4,5,6,7)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-# 사용자 아이디에 따른 HF_HOME 설정
-if echo $USER | grep -q "cvlab20"; then
-    echo "Running on cvlab20"
-    export HF_HOME='/mnt/dataset1/huggingface'
-elif echo $USER | grep -q "cvlab22"; then
-    export HF_HOME='/mnt/data1/huggingface'
-fi
-echo "HF_HOME is set to $HF_HOME"
 
 source ./.env
 

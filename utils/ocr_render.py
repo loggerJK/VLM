@@ -297,7 +297,7 @@ def generate_image(
         quality=quality,
         timeout=timeout,
     )
-    img = Image.open(io.BytesIO(png_bytes))
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
 
     if save_path is not None:
         img.save(save_path)

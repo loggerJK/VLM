@@ -3,7 +3,7 @@ set -e
 
 # 사용할 GPU 지정 (4,5,6,7)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 # 사용자 아이디에 따른 HF_HOME 설정
 if echo $USER | grep -q "cvlab20"; then
@@ -58,6 +58,7 @@ python -m torch.distributed.run \
     --precision bf16 \
     --grad_precision bf16 \
     --und_image_size 512 \
+    --gen_image_size 512 \
     --data_parallel none \
     --data_config $data_config \
     --num_workers 2 \
