@@ -15,9 +15,11 @@ Usage:
 from __future__ import annotations
 
 import io
+import os
 import random
 import shutil
 import subprocess
+import tempfile
 
 import markdown
 from PIL import Image
@@ -179,7 +181,7 @@ def _render_to_bytes(
     quality: int,
     timeout: int,
 ) -> bytes:
-    """Render HTML to PNG bytes via wkhtmltoimage (stdin → stdout, no temp files).
+    """Render HTML to PNG bytes via wkhtmltoimage (temp file I/O).
 
     Raises:
         RuntimeError: If wkhtmltoimage is not installed or rendering fails.
@@ -204,29 +206,46 @@ def _render_to_bytes(
     if quality < 100:
         cmd += ["--quality", str(quality)]
 
-    # stdin → stdout: "-" for both input and output
-    cmd += ["-", "-"]
+    # Use temp files to avoid pipe buffer deadlock (64KB limit)
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".html", delete=False, encoding="utf-8"
+    ) as tmp_in:
+        tmp_in.write(html)
+        tmp_in_path = tmp_in.name
+
+    tmp_out_path = tmp_in_path.replace(".html", ".png")
+    cmd += [tmp_in_path, tmp_out_path]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            input=html.encode("utf-8"),
-            capture_output=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"wkhtmltoimage timed out after {timeout}s") from exc
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"wkhtmltoimage timed out after {timeout}s") from exc
 
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"wkhtmltoimage failed (exit {proc.returncode}): {stderr}"
-        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"wkhtmltoimage failed (exit {proc.returncode}): {stderr}"
+            )
 
-    if not proc.stdout:
-        raise RuntimeError("wkhtmltoimage produced empty output")
+        if not os.path.exists(tmp_out_path):
+            raise RuntimeError("wkhtmltoimage produced no output file")
 
-    return proc.stdout
+        with open(tmp_out_path, "rb") as f:
+            png_bytes = f.read()
+
+        if not png_bytes:
+            raise RuntimeError("wkhtmltoimage produced empty output")
+
+        return png_bytes
+    finally:
+        for p in (tmp_in_path, tmp_out_path):
+            if os.path.exists(p):
+                os.unlink(p)
 
 
 def generate_image_bytes(

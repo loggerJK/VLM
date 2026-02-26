@@ -21,6 +21,7 @@ import seaborn as sns
 import pandas as pd
 from sklearn.metrics import confusion_matrix
 import io
+import warnings
 from PIL import Image
 
 # HuggingFace & Diffusers
@@ -158,6 +159,24 @@ def extract_number_fixed(text):
         
     return -1
 
+import re
+
+def check_pos_accuracy(ground_truth: str, prediction: str) -> bool:
+    pattern = r'(top-left|top-right|bottom-left|bottom-right)'
+    
+    gt_matches = re.findall(pattern, ground_truth.lower())
+    pred_matches = re.findall(pattern, prediction.lower())
+    
+    if not gt_matches or not pred_matches:
+        warnings.warn(f"위치를 파싱할 수 없음 — GT: {gt_matches}, Pred: {pred_matches}")
+        return False
+    
+    if len(pred_matches) > 1:
+        warnings.warn(f"Prediction에 여러 위치 감지: {pred_matches}, False 리턴")
+        return False
+    
+    return gt_matches[0] == pred_matches[0]
+
 def calculate_metrics(predictions, references, loaded_metrics=None):
     metrics = {}
 
@@ -267,7 +286,7 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 if task == 'ocr':
                     image = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
                 else:
-                    image = var_center_crop(image, crop_size_list=crop_size_list)
+                    image = var_center_crop(image, crop_size_list=crop_size_list) # counting, pointing, position
             return (image, caption)
 
         # Understanding Data
@@ -281,7 +300,7 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 answer = data_item['answer']
                 question = "Extract all text from the image."
                 image = generate_ocr_image('# ' + answer, template="random", width=self.und_image_size, height=self.und_image_size, quality=100)
-            elif task == 'pointing':
+            elif task in ['pointing', 'position']:
                 question = data_item.get('question', data_item.get('text', ''))
                 answer = str(data_item.get('answer', data_item.get('label', '')))
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
@@ -410,7 +429,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -838,6 +857,18 @@ class Solver(FinetuneSolverBase):
                     f"The text reads:\n"
                     f"{answer}") if answer else "Generate an image."
                 self.validation_prompts.append(caption)
+                
+        elif self.args.task == 'position':
+            val_ds = self.val_ds
+            rng = random.Random(42)
+            indices = rng.sample(range(len(val_ds)), min(10, len(val_ds))) # 최대 10개 샘플링
+
+            self.validation_prompts = []
+            for idx in indices:
+                item = val_ds[idx]
+                answer = item.get('answer', '')
+                self.validation_prompts.append(answer)
+        
         else:
             if self.global_rank == 0:
                 print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
@@ -855,7 +886,7 @@ class Solver(FinetuneSolverBase):
                     caption = caption[0]
                 self.validation_prompts.append(caption)
             
-        # print(f"self.validation_prompts: {self.validation_prompts}")
+        print(f"self.validation_prompts: {self.validation_prompts}")
         
         seq_len, newline_every, token_grid_height, token_grid_width = calculate_vq_params(self.args.gen_image_size, self.args.gen_image_size)
         self.validation_params = {
@@ -985,8 +1016,40 @@ class Solver(FinetuneSolverBase):
             return self._load_ocr_dataset()
         elif self.args.task == 'ocr_synthetic':
             return self._load_synthetic_ocr_dataset()
+        elif self.args.task == 'position':
+            return self._load_position_dataset()
         else:
             return self._load_counting_pointing_dataset()
+        
+
+    def _load_position_dataset(self):
+        print("[Solver] Loading Position Dataset...")
+        train_ds = load_dataset("heez/quadrant-position-new", split="train", streaming=False)
+
+        self.val_ds_stream = load_dataset("heez/quadrant-position-new", split="validation", streaming=False)
+        self.val_ds = self.val_ds_stream
+
+        # if self.args.count_upper_limit is not None:
+        #     train_ds = train_ds.filter(lambda count: count <= self.args.count_upper_limit, input_columns=['count'], num_proc=64)
+        #     self.val_ds_stream = self.val_ds_stream.filter(lambda count: count <= self.args.count_upper_limit, input_columns=['count'])
+        # if self.args.count_lower_limit is not None:
+        #     train_ds = train_ds.filter(lambda count: count >= self.args.count_lower_limit, input_columns=['count'], num_proc=64)
+        #     self.val_ds_stream = self.val_ds_stream.filter(lambda count: count >= self.args.count_lower_limit, input_columns=['count'])
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+
+        # Descriptions이 존재하는 샘플은 gen 데이터셋, 없는 샘플은 und 데이터셋으로 분리
+        train_und_ds = train_ds
+        train_gen_ds = train_ds.map(
+            lambda answer: {
+                'descriptions': answer
+            },
+            input_columns=['answer'], num_proc=64
+        ) # Answer -> Descriptions
+
+        # Understanding validation dataset: train_und_ds에서 100개 샘플 선택
+        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
         
     def _load_synthetic_ocr_dataset(self):
         print("[Solver] Loading Synthetic OCR Dataset...")
@@ -1112,6 +1175,152 @@ class Solver(FinetuneSolverBase):
         model.save_pretrained(save_path)
         tokenizer.save_pretrained(save_path)
         print("[Solver] Starting point saved.")
+        
+    @torch.no_grad()
+    def validate_position(self, epoch):
+        dist.barrier() # Sync before validation
+        
+        # Rank 준비
+        local_rank = dist.get_rank() 
+        world_size = dist.get_world_size()
+        if self.global_rank == 0:
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on Quadrant Positioning...")
+        
+        self.model.eval()
+        
+        # Ensure VQ-VAE is loaded
+        if not hasattr(self, 'vqvae'):
+            print("[Solver] Loading VQ-VAE for validation...")
+             # Reuse logic from train_one_epoch
+            if self.args.precision == "bf16":
+                dtype = torch.bfloat16
+            elif self.args.precision == "fp16":
+                raise ValueError("FP16 precision is not supported for VQ-VAE.")
+            else:
+                dtype = torch.float32
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+            self.vqvae.eval()
+
+        correct = 0
+        total = 0
+        eval_limit = 100
+        
+        # Rank별로 local_dataset 리스트 준비
+        eval_dataset = iter(self.val_ds_stream)
+        local_dataset_list = []
+        for i, _item in enumerate(eval_dataset):
+            if i >= eval_limit:
+                break
+            if i % world_size == local_rank:
+                local_dataset_list.append(_item)
+        
+        import gc
+        local_predictions = []
+        local_references = []
+        local_questions = []
+        local_images = []
+
+        with torch.no_grad():
+            # Only rank 0 shows progress bar to avoid clutter
+            disable_tqdm = (self.global_rank != 0)
+            progress = tqdm(range(len(local_dataset_list)), desc="Validation", unit="sample", disable=disable_tqdm)
+
+            for idx, item in enumerate(local_dataset_list):
+                image = item.get('image')
+                question = item.get('question')
+                answer_gt = item.get('answer')
+                
+
+                # Preprocess Image
+                crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+                
+                # Encode Image
+                input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
+
+                instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
+                input_ids_raw = self.tokenizer(instruction)['input_ids']
+                input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                code_start = len(input_token) + 1
+                STEPS_LENGTH = 128
+                GEN_LENGTH = 128
+                BLOCK_LENGTH = 128
+                input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+                input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
+
+                out = generate_text_understanding(
+                    self.model, input_ids,
+                    steps=STEPS_LENGTH,
+                    gen_length=GEN_LENGTH,
+                    block_length=BLOCK_LENGTH,
+                    temperature=0.0,
+                    cfg_scale=0.0,
+                    remasking='low_confidence',
+                    code_start=code_start
+                )
+
+                pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
+
+                print("=" * 50)
+                print(f"Prediction: \n{pred_text}")
+                print(f"Ground Truth: \n{answer_gt}")
+                
+
+                local_predictions.append(pred_text)
+                local_references.append(answer_gt)
+                local_questions.append(question)
+                local_images.append(image_processed)
+
+                if idx % 2 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+        # Gather results from all GPUs
+        all_predictions = [None] * world_size
+        all_references = [None] * world_size
+        all_questions = [None] * world_size
+        all_images = [None] * world_size
+
+        dist.barrier()
+        dist.all_gather_object(all_predictions, local_predictions)
+        dist.all_gather_object(all_references, local_references)
+        dist.all_gather_object(all_questions, local_questions)
+        dist.all_gather_object(all_images, local_images)
+        
+        if self.global_rank == 0:
+            predictions = [p for sublist in all_predictions for p in sublist]
+            references = [r for sublist in all_references for r in sublist]
+            questions = [q for sublist in all_questions for q in sublist]
+            images = [img for sublist in all_images for img in sublist]
+
+
+            print(f"[Position Validation] Gathered {len(predictions)} predictions from {world_size} GPUs")
+
+            if self.args.use_wandb:
+                # 준비
+                val_table = wandb.Table(columns=["Step", "Image", "Question", "Answer", "GT", "Correctness"])
+                acc_list = []
+                
+                for pred, ref, q, img in zip(predictions, references, questions, images):
+                    acc_bool = check_pos_accuracy(pred, ref)
+                    acc_list.append(acc_bool)
+                    val_table.add_data(self.global_step, wandb.Image(img), q, pred, ref, acc_bool)
+                
+                # Calculate overall accuracy
+                acc_list = np.array(acc_list)
+                accuracy = acc_list.mean()
+                print(f"[Positioning Validation] Accuracy: {accuracy:.4f} ({acc_list.sum()}/{len(acc_list)})")
+                    
+                # Log    
+                wandb.log({
+                    "val/pos_verbose": val_table,
+                    "val/pos_acc": accuracy
+                })
+                
+        dist.barrier() # Ensure all ranks are done before moving on
+        self.model.train()
+                
 
     @torch.no_grad()
     def validate(self, epoch, format="counting", split="val"):
@@ -1150,6 +1359,7 @@ class Solver(FinetuneSolverBase):
         gt_counts = []
         pred_counts = []
         
+        # Rank별로 local_dataset 리스트 준비
         if split == "val":
             # All ranks iterate, but effectively they process the same data if not sharded. 
             # For FSDP generation, they MUST run the same inputs to keep internal states synced.
@@ -1581,10 +1791,11 @@ class Solver(FinetuneSolverBase):
         run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
 
         if run_und and self.args.wandb_run_id is None:
-            if self.args.task in ['ocr', 'ocr_synthetic']:
+            if self.args.task in ['ocr', 'ocr_synthetic']: # OCR
                 self.validate_ocr(self.start_epoch)
-                pass
-            else:
+            elif self.args.task == 'position':
+                self.validate_position(self.start_epoch)
+            else: # Counting, Pointing
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
                 if self.args.validation_as_pointing_format:
@@ -1871,8 +2082,8 @@ class Solver(FinetuneSolverBase):
             )
 
             with {
-                "bf16": torch.cuda.amp.autocast(dtype=torch.bfloat16),
-                "fp16": torch.cuda.amp.autocast(dtype=torch.float16),
+                "bf16": torch.amp.autocast(dtype=torch.bfloat16, device_type='cuda'),
+                "fp16": torch.amp.autocast(dtype=torch.float16, device_type='cuda'),
                 "fp32": contextlib.nullcontext(),
                 "tf32": contextlib.nullcontext(),
             }[self.args.precision]:
@@ -1923,6 +2134,8 @@ class Solver(FinetuneSolverBase):
                     if run_und:
                         if self.args.task in ['ocr', 'ocr_synthetic']:
                             self.validate_ocr(epoch)
+                        elif self.args.task == 'position':
+                            self.validate_position(epoch)
                         else:
                             self.validate(epoch, split="train")
                             self.validate(epoch, split="val")

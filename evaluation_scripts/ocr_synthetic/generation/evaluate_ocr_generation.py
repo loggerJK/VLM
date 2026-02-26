@@ -105,8 +105,8 @@ def calculate_metrics(predictions, references, loaded_metrics=None):
     cer_metric = loaded_metrics.get("cer") if loaded_metrics else evaluate.load("cer")
     meteor_metric = loaded_metrics.get("meteor") if loaded_metrics else evaluate.load("meteor")
 
-    preds_norm = [p.lower() for p in predictions]
-    refs_norm = [r.lower() for r in references]
+    preds_norm = [p.lower().replace("\n", " ").strip() for p in predictions]
+    refs_norm = [r.lower().replace("\n", " ").strip() for r in references]
 
     valid_indices = [i for i, r in enumerate(refs_norm) if len(r.strip()) > 0]
     if not valid_indices:

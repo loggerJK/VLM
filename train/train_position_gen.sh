@@ -3,7 +3,7 @@ set -e
 
 # 사용할 GPU 지정 (4,5,6,7)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5
 
 # 사용자 아이디에 따른 HF_HOME 설정
 if echo $USER | grep -q "cvlab20"; then
@@ -29,7 +29,7 @@ accum_iter=$((effective_batch / (batchsize_per_gpu * n_gpus)))
 dropout=0.05
 lora_rank=128
 max_seq_len=5120
-mode='und'
+mode='gen'
 exp_name="lora128_position_wohead_$mode"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
@@ -56,7 +56,7 @@ echo "Output Directory: $output_dir"
 # Torchrun 실행
 python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
-    --master_port=29506 \
+    --master_port=29507 \
     train/train_unified.py \
     --task position \
     --mode $mode \

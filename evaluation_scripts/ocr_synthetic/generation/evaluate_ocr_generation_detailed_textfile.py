@@ -212,6 +212,11 @@ def main():
     parser.add_argument("--ocr_device", type=str, default=None,
                         help="Device for GLM-OCR (e.g. 'cuda:1'). Defaults to same as generation model.")
     args = parser.parse_args()
+    
+    results_json_path = os.path.join(args.output_dir, "results.json")
+    if os.path.exists(results_json_path):
+        print(f"Results file already exists at {results_json_path}. Please remove it to run a new evaluation.")
+        return
 
     # Initialize Distributed
     if "WORLD_SIZE" in os.environ:

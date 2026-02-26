@@ -98,8 +98,8 @@ def calculate_metrics(predictions, references, loaded_metrics=None):
     cer_metric = loaded_metrics.get("cer") if loaded_metrics else evaluate.load("cer")
     meteor_metric = loaded_metrics.get("meteor") if loaded_metrics else evaluate.load("meteor")
 
-    preds_norm = [p.lower() for p in predictions]
-    refs_norm = [r.lower() for r in references]
+    preds_norm = [p.lower().replace("\n", " ").strip() for p in predictions]
+    refs_norm = [r.lower().replace("\n", " ").strip() for r in references]
 
     valid_indices = [i for i, r in enumerate(refs_norm) if len(r.strip()) > 0]
     if not valid_indices:
@@ -295,11 +295,20 @@ def main():
         input_ids = torch.tensor(input_token, device=device).unsqueeze(0)
 
         # Generate
+        if args.give_first_token:
+            actual_gen_length = len(answer_template)
+            actual_block_length = actual_gen_length
+            actual_steps = actual_gen_length
+        else:
+            actual_gen_length = args.gen_length
+            actual_block_length = args.block_length
+            actual_steps = args.steps
+
         out = generate_text_understanding(
             model, input_ids,
-            steps=args.steps,
-            gen_length=args.gen_length,
-            block_length=args.block_length,
+            steps=actual_steps,
+            gen_length=actual_gen_length,
+            block_length=actual_block_length,
             temperature=args.temperature,
             cfg_scale=0.0,
             remasking='low_confidence',
@@ -342,7 +351,7 @@ def main():
         # Merge all per-rank JSONL files
         results = []
         seen_indices = set()
-        for jsonl_file in sorted(glob.glob(os.path.join(args.output_dir, "results_rank*.jsonl"))):
+        for jsonl_file in sorted(glob.glob(os.path.join(glob.escape(args.output_dir), "results_rank*.jsonl"))):
             with open(jsonl_file, "r") as f:
                 for line in f:
                     line = line.strip()

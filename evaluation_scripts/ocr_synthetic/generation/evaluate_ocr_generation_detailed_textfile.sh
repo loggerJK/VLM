@@ -39,7 +39,7 @@ echo "========================================"
 echo "Running baseline OCR generation evaluation for ${prompt_type} dataset"
 echo "========================================"
 
-run_eval "${OUTPUT_BASE}/baseline"
+# run_eval "${OUTPUT_BASE}/baseline"
 
 # ---------------------------------------------------------------------------- #
 #                               OCR_Understanding                              #
@@ -79,7 +79,7 @@ done
 
 checkpoint_path="dvlm/lumina/checkpoints"
 ckpt_list=(
-    "lora128_ocr_synthetic_wohead/epoch0"
+    # "lora128_ocr_synthetic_wohead/epoch0"
     "lora128_ocr_synthetic_wohead/epoch1"
     "lora128_ocr_synthetic_wohead/epoch2"
     "lora128_ocr_synthetic_wohead/epoch3"

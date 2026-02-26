@@ -3,7 +3,7 @@ set -e
 
 # 사용할 GPU 지정 (4,5,6,7)
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5
 
 # 사용자 아이디에 따른 HF_HOME 설정
 if echo $USER | grep -q "cvlab20"; then
@@ -24,13 +24,11 @@ wd=0.1
 epochs=1
 batchsize_per_gpu=1
 n_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
-effective_batch=128
-accum_iter=$((effective_batch / (batchsize_per_gpu * n_gpus)))
+accum_iter=32
 dropout=0.05
 lora_rank=128
 max_seq_len=5120
-mode='und'
-exp_name="lora128_position_wohead_$mode"
+exp_name="lora128_ocr_synthetic_wohead_gen_#2"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
@@ -39,18 +37,7 @@ source .env
 
 mkdir -p "$output_dir"
 
-# Echo everything
-echo "==========Starting Position training (unified)...=========="
-echo "Using GPUs: $CUDA_VISIBLE_DEVICES"
-echo "Learning Rate: $lr"
-echo "Weight Decay: $wd"
-echo "Epochs: $epochs"
-echo "Batch Size per GPU: $batchsize_per_gpu"
-echo "Effective Batch Size: $effective_batch"
-echo "Accumulation Iterations: $accum_iter"
-echo "Dropout: $dropout"
-echo "LoRA Rank: $lora_rank"
-echo "Max Sequence Length: $max_seq_len"
+echo "Starting OCR Synthetic training (unified)..."
 echo "Output Directory: $output_dir"
 
 # Torchrun 실행
@@ -58,8 +45,8 @@ python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
     --master_port=29506 \
     train/train_unified.py \
-    --task position \
-    --mode $mode \
+    --task ocr_synthetic \
+    --mode gen \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter ${accum_iter} \
     --epochs ${epochs} \
@@ -83,7 +70,7 @@ python -m torch.distributed.run \
     --init_from ${init_from} \
     --disable_length_clustering \
     --use_wandb \
-    --wandb_project "lumina-position" \
+    --wandb_project "lumina-ocr" \
     --wandb_run_name $exp_name \
     --use_lora \
     --lora_rank ${lora_rank} \
