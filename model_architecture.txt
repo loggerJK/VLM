@@ -1,0 +1,121 @@
+import os
+from copy import deepcopy
+from typing import (
+    Any,
+    AsyncIterable,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Union,
+)
+import requests
+from io import BytesIO
+
+from PIL import Image
+import torch
+from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
+
+from data.transforms import ImageTransform
+from data.data_utils import pil_img2rgb, add_special_tokens
+from modeling.bagel import (
+    BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM, SiglipVisionConfig, SiglipVisionModel
+)
+from modeling.qwen2 import Qwen2Tokenizer
+from modeling.bagel.qwen2_navit import NaiveCache
+from modeling.autoencoder import load_ae
+from safetensors.torch import load_file
+
+
+Bagel(
+  (language_model): Qwen2ForCausalLM(
+    (model): Qwen2Model(
+      (embed_tokens): Embedding(152064, 3584)
+      (layers): ModuleList(
+        (0-27): 28 x Qwen2MoTDecoderLayer(
+          (self_attn): PackedAttentionMoT(
+            (q_proj): Linear(in_features=3584, out_features=3584, bias=True)
+            (k_proj): Linear(in_features=3584, out_features=512, bias=True)
+            (v_proj): Linear(in_features=3584, out_features=512, bias=True)
+            (o_proj): Linear(in_features=3584, out_features=3584, bias=False)
+            (q_norm): Qwen2RMSNorm((128,), eps=1e-06)
+            (k_norm): Qwen2RMSNorm((128,), eps=1e-06)
+            (q_norm_moe_gen): Qwen2RMSNorm((128,), eps=1e-06)
+            (k_norm_moe_gen): Qwen2RMSNorm((128,), eps=1e-06)
+            (q_proj_moe_gen): Linear(in_features=3584, out_features=3584, bias=True)
+            (k_proj_moe_gen): Linear(in_features=3584, out_features=512, bias=True)
+            (v_proj_moe_gen): Linear(in_features=3584, out_features=512, bias=True)
+            (o_proj_moe_gen): Linear(in_features=3584, out_features=3584, bias=False)
+          )
+          (mlp): Qwen2MLP(
+            (gate_proj): Linear(in_features=3584, out_features=18944, bias=False)
+            (up_proj): Linear(in_features=3584, out_features=18944, bias=False)
+            (down_proj): Linear(in_features=18944, out_features=3584, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (mlp_moe_gen): Qwen2MLP(
+            (gate_proj): Linear(in_features=3584, out_features=18944, bias=False)
+            (up_proj): Linear(in_features=3584, out_features=18944, bias=False)
+            (down_proj): Linear(in_features=18944, out_features=3584, bias=False)
+            (act_fn): SiLUActivation()
+          )
+          (input_layernorm): Qwen2RMSNorm((3584,), eps=1e-06)
+          (input_layernorm_moe_gen): Qwen2RMSNorm((3584,), eps=1e-06)
+          (post_attention_layernorm): Qwen2RMSNorm((3584,), eps=1e-06)
+          (post_attention_layernorm_moe_gen): Qwen2RMSNorm((3584,), eps=1e-06)
+        )
+      )
+      (norm): Qwen2RMSNorm((3584,), eps=1e-06)
+      (norm_moe_gen): Qwen2RMSNorm((3584,), eps=1e-06)
+      (rotary_emb): Qwen2RotaryEmbedding()
+    )
+    (lm_head): Linear(in_features=3584, out_features=152064, bias=False)
+  )
+  (time_embedder): TimestepEmbedder(
+    (mlp): Sequential(
+      (0): Linear(in_features=256, out_features=3584, bias=True)
+      (1): SiLU()
+      (2): Linear(in_features=3584, out_features=3584, bias=True)
+    )
+  )
+  (vae2llm): Linear(in_features=64, out_features=3584, bias=True)
+  (llm2vae): Linear(in_features=3584, out_features=64, bias=True)
+  (latent_pos_embed): PositionEmbedding()
+  (vit_model): SiglipVisionModel(
+    (vision_model): SiglipVisionTransformer(
+      (embeddings): SiglipVisionEmbeddings(
+        (position_embedding): Embedding(4900, 1152)
+        (patch_embedding): Linear(in_features=588, out_features=1152, bias=True)
+      )
+      (encoder): SiglipEncoder(
+        (layers): ModuleList(
+          (0-25): 26 x SiglipEncoderLayer(
+            (self_attn): SiglipFlashAttention2(
+              (k_proj): Linear(in_features=1152, out_features=1152, bias=True)
+              (v_proj): Linear(in_features=1152, out_features=1152, bias=True)
+              (q_proj): Linear(in_features=1152, out_features=1152, bias=True)
+              (out_proj): Linear(in_features=1152, out_features=1152, bias=True)
+            )
+            (layer_norm1): LayerNorm((1152,), eps=1e-06, elementwise_affine=True)
+            (mlp): SiglipMLP(
+              (activation_fn): GELUTanh()
+              (fc1): Linear(in_features=1152, out_features=4304, bias=True)
+              (fc2): Linear(in_features=4304, out_features=1152, bias=True)
+            )
+            (layer_norm2): LayerNorm((1152,), eps=1e-06, elementwise_affine=True)
+          )
+        )
+      )
+      (post_layernorm): LayerNorm((1152,), eps=1e-06, elementwise_affine=True)
+    )
+  )
+  (connector): MLPconnector(
+    (activation_fn): GELUTanh()
+    (fc1): Linear(in_features=1152, out_features=3584, bias=True)
+    (fc2): Linear(in_features=3584, out_features=3584, bias=True)
+  )
+  (vit_pos_embed): PositionEmbedding()
+)

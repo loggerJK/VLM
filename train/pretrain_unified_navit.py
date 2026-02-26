@@ -38,6 +38,9 @@ from train.fsdp_utils import (
 )
 from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
 from tqdm import tqdm
+import evaluate
+import nltk
+from nltk.translate.bleu_score import sentence_bleu
 
 def count_parameters(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
@@ -717,6 +720,81 @@ def validate_generation(
     return metrics
 
 
+def calculate_metrics(predictions, references, loaded_metrics=None):
+    """Calculate OCR metrics: WER, CER, METEOR, BLEU, edit_distance, word P/R/F1."""
+    metrics = {}
+
+    wer_metric = loaded_metrics.get("wer") if loaded_metrics else evaluate.load("wer")
+    cer_metric = loaded_metrics.get("cer") if loaded_metrics else evaluate.load("cer")
+    meteor_metric = loaded_metrics.get("meteor") if loaded_metrics else evaluate.load("meteor")
+
+    preds_norm = [p.lower() for p in predictions]
+    refs_norm = [r.lower() for r in references]
+
+    valid_indices = [i for i, r in enumerate(refs_norm) if len(r.strip()) > 0]
+    if not valid_indices:
+        return {"wer": 1.0, "cer": 1.0, "meteor": 0.0, "bleu": 0.0, "edit_distance": 0.0, "f1": 0.0, "precision": 0.0, "recall": 0.0}
+
+    preds_norm = [preds_norm[i] for i in valid_indices]
+    refs_norm = [refs_norm[i] for i in valid_indices]
+
+    try:
+        metrics["wer"] = wer_metric.compute(predictions=preds_norm, references=refs_norm)
+    except:
+        metrics["wer"] = 1.0
+
+    try:
+        metrics["cer"] = cer_metric.compute(predictions=preds_norm, references=refs_norm)
+    except:
+        metrics["cer"] = 1.0
+
+    try:
+        metrics["meteor"] = meteor_metric.compute(predictions=preds_norm, references=refs_norm)["meteor"]
+    except:
+        metrics["meteor"] = 0.0
+
+    try:
+        bleu_scores = []
+        for p, r in zip(preds_norm, refs_norm):
+            bleu_scores.append(sentence_bleu([r.split()], p.split(), weights=(0.5, 0.5)))
+        metrics["bleu"] = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0.0
+    except:
+        metrics["bleu"] = 0.0
+
+    try:
+        edit_dists = []
+        for p, r in zip(preds_norm, refs_norm):
+            edit_dists.append(nltk.edit_distance(p, r))
+        metrics["edit_distance"] = sum(edit_dists) / len(edit_dists) if edit_dists else 0.0
+    except:
+        metrics["edit_distance"] = 0.0
+
+    # Word-level Precision, Recall, F1
+    try:
+        total_p, total_r, total_f1 = 0.0, 0.0, 0.0
+        for p, r in zip(preds_norm, refs_norm):
+            p_words = set(p.split())
+            r_words = set(r.split())
+            if not p_words or not r_words:
+                continue
+            intersection = p_words.intersection(r_words)
+            prec = len(intersection) / len(p_words) if p_words else 0.0
+            rec = len(intersection) / len(r_words) if r_words else 0.0
+            f1 = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+            total_p += prec
+            total_r += rec
+            total_f1 += f1
+        metrics["precision"] = total_p / len(preds_norm)
+        metrics["recall"] = total_r / len(preds_norm)
+        metrics["f1"] = total_f1 / len(preds_norm)
+    except:
+        metrics["precision"] = 0.0
+        metrics["recall"] = 0.0
+        metrics["f1"] = 0.0
+
+    return metrics
+
+
 @torch.no_grad()
 def validate_understanding(
     model, tokenizer, new_token_ids, image_transform, val_ds, task, device, logger,
@@ -734,12 +812,13 @@ def validate_understanding(
     correct = 0
     total = 0
     mad_sum = 0.0
-    cer_sum = 0.0
+    predictions = []
+    references = []
 
     n_samples = min(100, len(val_ds))  # Limit to 20 for speed
     indices = list(range(n_samples))
 
-    for idx in indices:
+    for idx in tqdm(indices, total=n_samples, desc="Validation(Und)", disable=dist.get_rank() != 0):
         try:
             item = val_ds[idx]
 
@@ -777,18 +856,16 @@ def validate_understanding(
                 if pred_num == gt_num:
                     correct += 1
                 mad_sum += abs(pred_num - gt_num)
-                print(f"="*50)
-                print(f"Question: \n{question}")
-                print(f"Prediction: \n{pred}")
-                print(f"Ground Truth: \n{answer_gt}")
             else:
-                # OCR: exact match + CER
+                # OCR: exact match + collect for nltk metrics
                 if pred.strip().lower() == answer_gt.strip().lower():
                     correct += 1
-                # Simple character error rate
-                max_len = max(len(pred), len(answer_gt), 1)
-                errors = sum(1 for a, b in zip(pred, answer_gt) if a != b) + abs(len(pred) - len(answer_gt))
-                cer_sum += errors / max_len
+                predictions.append(pred.strip())
+                references.append(answer_gt.strip())
+            print(f"="*50)
+            print(f"Question: \n{question}")
+            print(f"Prediction: \n{pred}")
+            print(f"Ground Truth: \n{answer_gt}")
 
             total += 1
 
@@ -803,17 +880,23 @@ def validate_understanding(
         metrics["val_accuracy"] = correct / total
         if task == "counting":
             metrics["val_mad"] = mad_sum / total
-        else:
-            metrics["val_cer"] = cer_sum / total
+        elif task in ("ocr", "ocr_synthetic") and predictions:
+            loaded = {
+                "wer": evaluate.load("wer"),
+                "cer": evaluate.load("cer"),
+                "meteor": evaluate.load("meteor"),
+            }
+            ocr_metrics = calculate_metrics(predictions, references, loaded_metrics=loaded)
+            for k, v in ocr_metrics.items():
+                metrics[f"val/{k}"] = v
     else:
         metrics["val_accuracy"] = 0.0
 
     return metrics
 
 
-def _save_lora_ckpt_no_fsdp(ckpt_dir, train_steps, model, optimizer, scheduler, data_status, logger, save_name=None):
+def _save_lora_ckpt_no_fsdp(ckpt_dir, train_steps, model, optimizer, scheduler, data_status, logger, save_name=None, global_cumulative_samples=0):
     """Save LoRA checkpoint without FSDP (for LoRA training, with or without DDP)."""
-    from safetensors.torch import save_file
     # Unwrap DDP if needed
     raw_model = model.module if hasattr(model, 'module') else model
     if save_name is None:
@@ -821,25 +904,22 @@ def _save_lora_ckpt_no_fsdp(ckpt_dir, train_steps, model, optimizer, scheduler, 
     save_path = os.path.join(ckpt_dir, save_name)
     os.makedirs(save_path, exist_ok=True)
     logger.info(f"Saving LoRA checkpoint to {save_path}")
-    # Save LoRA adapter
-    lora_state = {k: v.cpu() for k, v in raw_model.state_dict().items() if "lora_" in k or "modules_to_save" in k}
-    save_file(lora_state, os.path.join(save_path, "adapter_model.safetensors"))
-    if hasattr(raw_model, 'peft_config'):
-        for _, cfg in raw_model.peft_config.items():
-            cfg.save_pretrained(save_path)
-            break
-    logger.info(f"Saved LoRA adapter ({len(lora_state)} tensors) to {save_path}")
+    # Save LoRA adapter via PeftModel.save_pretrained (correct key format without .default.)
+    raw_model.save_pretrained(save_path)
+    logger.info(f"Saved LoRA adapter to {save_path}")
     # Save optimizer, scheduler, data_status
     torch.save(optimizer.state_dict(), os.path.join(save_path, "optimizer.00000-of-00001.pt"))
     if scheduler is not None:
         torch.save(scheduler.state_dict(), os.path.join(save_path, "scheduler.pt"))
     if data_status is not None:
         torch.save(data_status, os.path.join(save_path, "data_status.pt"))
+    torch.save(global_cumulative_samples, os.path.join(save_path, "global_cumulative_samples.pt"))
 
 
 def _do_checkpoint_save(
     training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
     data_status, fsdp_config, curr_step, logger, save_name=None,
+    global_cumulative_samples=0,
 ):
     """Gather data_status across ranks, save checkpoint, and cleanup CUDA cache."""
     torch.cuda.empty_cache()
@@ -859,15 +939,15 @@ def _do_checkpoint_save(
             _save_lora_ckpt_no_fsdp(
                 training_args.checkpoint_dir, curr_step, fsdp_model,
                 optimizer, scheduler, gather_list, logger, save_name=save_name,
+                global_cumulative_samples=global_cumulative_samples,
             )
-        if dist.get_world_size() > 1:
-            dist.barrier()
     else:
         FSDPCheckpoint.fsdp_save_ckpt(
             ckpt_dir=training_args.checkpoint_dir, train_steps=curr_step,
             model=fsdp_model, ema_model=None, optimizer=optimizer,
             scheduler=scheduler, logger=logger, fsdp_config=fsdp_config,
             data_status=gather_list, use_lora=training_args.use_lora, save_name=save_name,
+            global_cumulative_samples=global_cumulative_samples,
         )
     gc.collect()
     torch.cuda.empty_cache()
@@ -912,9 +992,9 @@ def main():
             mode="offline" if training_args.wandb_offline else "online",
             settings=wandb.Settings(init_timeout=120)
         )
-        wandb.config.update(training_args)
-        wandb.config.update(model_args)
-        wandb.config.update(data_args)
+        wandb.config.update(training_args, allow_val_change = True)
+        wandb.config.update(model_args, allow_val_change = True)
+        wandb.config.update(data_args, allow_val_change = True)
         if training_args.peak_device_tflops > 0:
             logger.info(f"Using peak_device_tflops={training_args.peak_device_tflops:.2f} TFLOPs (per GPU).")
         else:
@@ -1009,6 +1089,9 @@ def main():
         model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
     
     if training_args.finetune_from_hf:
+        print("=" * 50)
+        print(f"Loading PRETRAINED model weights from {model_args.model_path} (HuggingFace format)")
+        print("=" * 50)
         # safetensors에서 GPU로 직접 로드
         from safetensors.torch import load_file
         state_dict = load_file(os.path.join(model_args.model_path, "ema.safetensors"), device=device)
@@ -1056,11 +1139,27 @@ def main():
 
         if training_args.lora_ckpt_path is not None:
             # Resume from a saved LoRA adapter
+            print("=" * 50)
+            print(f"Loading LoRA adapter from {training_args.lora_ckpt_path}")
+            print("=" * 50)
+
+            # Fix legacy key format: strip ".default." from adapter keys
+            from safetensors.torch import load_file, save_file as sf_save
+            adapter_path = os.path.join(training_args.lora_ckpt_path, "adapter_model.safetensors")
+            if os.path.exists(adapter_path):
+                sd = load_file(adapter_path)
+                if any(".default." in k for k in sd.keys()):
+                    sd = {k.replace(".default.", "."): v for k, v in sd.items()}
+                    sf_save(sd, adapter_path)
+                    logger.info("Fixed legacy .default. keys in adapter checkpoint")
+
             logger.info(f"Loading LoRA adapter from {training_args.lora_ckpt_path}")
             model = PeftModel.from_pretrained(
                 model, training_args.lora_ckpt_path,
                 is_trainable=True, torch_device="cpu",
             )
+            # move adapter to GPU if not already there
+            model = model.to(device)
         else:
             logger.info(f"Applying LoRA: rank={training_args.lora_rank}, alpha={training_args.lora_alpha}, "
                         f"dropout={training_args.lora_dropout}, targets={target_modules}")
@@ -1077,7 +1176,7 @@ def main():
             )
             model = get_peft_model(model, lora_config)
 
-        model.print_trainable_parameters()
+        # model.print_trainable_parameters()
 
     # Setup FSDP and load pretrained model:
     fsdp_config = FSDPConfig(
@@ -1109,7 +1208,7 @@ def main():
         )
         if dist.get_world_size() > 1:
             from torch.nn.parallel import DistributedDataParallel as DDP
-            fsdp_model = DDP(model, device_ids=[device])
+            fsdp_model = DDP(model, device_ids=[device], find_unused_parameters=True)
             logger.info(f"Wrapped LoRA model in DDP for {dist.get_world_size()}-GPU gradient sync")
         else:
             fsdp_model = model
@@ -1123,10 +1222,10 @@ def main():
             check_fn=grad_checkpoint_check_fn
         )
 
-    if dist.get_rank() == 0:
-        print(fsdp_model)
-        for name, param in model.named_parameters():
-            print(name, param.requires_grad)
+    # if dist.get_rank() == 0:
+    #     print(fsdp_model)
+    #     for name, param in model.named_parameters():
+    #         print(name, param.requires_grad)
 
     # Setup optimizer and scheduler
     # LoRA + 8-bit AdamW: override dangerously small eps (1e-15) to prevent
@@ -1155,9 +1254,9 @@ def main():
             weight_decay=0
         )
     # LoRA: auto-add warmup to avoid full-lr cold start instability
-    if training_args.use_lora and training_args.warmup_steps == 0:
-        training_args.warmup_steps = 200
-        logger.warning(f"LoRA training: auto-setting warmup_steps=200 for stability")
+    # if training_args.use_lora and training_args.warmup_steps == 0:
+    #     training_args.warmup_steps = 200
+    #     logger.warning(f"LoRA training: auto-setting warmup_steps=200 for stability")
 
     if training_args.lr_scheduler == 'cosine':
         scheduler = get_cosine_with_min_lr_schedule_with_warmup(
@@ -1177,9 +1276,11 @@ def main():
     if resume_model_only:
         train_step = 0
         data_status = None
+        restored_global_cumulative_samples = 0
+        restored_last_saved_epoch = -1
     else:
-        optimizer, scheduler, train_step, data_status = FSDPCheckpoint.try_load_train_state(
-            resume_from, optimizer, scheduler, fsdp_config, 
+        optimizer, scheduler, train_step, data_status, restored_global_cumulative_samples, restored_last_saved_epoch = FSDPCheckpoint.try_load_train_state(
+            resume_from, optimizer, scheduler, fsdp_config,
         )
         
 
@@ -1276,49 +1377,51 @@ def main():
         vae_model.to(device).eval()
     fsdp_model.train()
 
-    # # eval before training
-    # if val_ds is not None and data_args.eval_before_training:
-    #     if dist.get_rank() == 0:
-    #         logger.info("Running validation before training (step 0)...")
-    #         val_metrics = validate_understanding(
-    #             model=fsdp_model, tokenizer=tokenizer,
-    #             new_token_ids=new_token_ids, image_transform=val_image_transform,
-    #             val_ds=val_ds, task=data_args.task, device=device, logger=logger,
-    #         )
-    #         val_message = "(step=0000000) Validation [before training]: "
-    #         for k, v in val_metrics.items():
-    #             val_message += f"{k}={v:.4f} "
-    #         logger.info(val_message)
-    #         print(val_message, flush=True)
-    #         wandb.log(val_metrics, step=train_step)
-    #         fsdp_model.train()
-    #     if dist.get_world_size() > 1:
-    #         dist.barrier()
+    # eval before training
+    if val_ds is not None and data_args.eval_before_training:
+        if dist.get_rank() == 0:
+            logger.info("Running validation before training (step 0)...")
+            val_metrics = validate_understanding(
+                model=fsdp_model, tokenizer=tokenizer,
+                new_token_ids=new_token_ids, image_transform=val_image_transform,
+                val_ds=val_ds, task=data_args.task, device=device, logger=logger,
+            )
+            val_message = "(step=0000000) Validation [before training]: "
+            for k, v in val_metrics.items():
+                val_message += f"{k}={v:.4f} "
+            logger.info(val_message)
+            print(val_message, flush=True)
+            wandb.log(val_metrics)
+            fsdp_model.train()
+    dist.barrier()
 
-    # # eval before training - generation
-    # if val_gen_prompts is not None and data_args.eval_before_training:
-    #     if dist.get_rank() == 0:
-    #         logger.info("Running generation validation before training (step 0)...")
-    #         gen_metrics = validate_generation(
-    #             model=fsdp_model, vae_model=vae_model,
-    #             tokenizer=tokenizer, new_token_ids=new_token_ids,
-    #             prompts=val_gen_prompts, resolution=data_args.val_gen_resolution,
-    #             device=device, logger=logger,
-    #         )
-    #         wandb.log(gen_metrics, step=train_step)
-    #         fsdp_model.train()
-    #     if dist.get_world_size() > 1:
-    #         dist.barrier()
+    # eval before training - generation
+    if val_gen_prompts is not None and data_args.eval_before_training:
+        if dist.get_rank() == 0:
+            logger.info("Running generation validation before training (step 0)...")
+            gen_metrics = validate_generation(
+                model=fsdp_model, vae_model=vae_model,
+                tokenizer=tokenizer, new_token_ids=new_token_ids,
+                prompts=val_gen_prompts, resolution=data_args.val_gen_resolution,
+                device=device, logger=logger,
+            )
+            wandb.log(gen_metrics)
+            fsdp_model.train()
+    dist.barrier()
 
     # train loop
     start_time = time()
-    cumulative_samples = 0
-    last_saved_epoch = -1
+    cumulative_samples = int(restored_global_cumulative_samples) // max(dist.get_world_size(), 1)
+    last_saved_epoch = restored_last_saved_epoch
     logger.info(f"Training for {training_args.total_steps} steps, starting at {train_step}...")
     optimizer.zero_grad()
     total_norm = torch.tensor(0.0, device=device)
     token_window = 0.0
     seqlen_square_window = 0.0
+    accum_loss_dict = {}
+    accum_ce_tokens = 0
+    accum_mse_tokens = 0
+    accum_count = 0
     dense_token_factor, attn_factor = qwen2_flop_coefficients(model.language_model.config)
     for micro_step, data in enumerate(train_loader):
         curr_step = train_step + micro_step // training_args.gradient_accumulation_steps
@@ -1379,6 +1482,14 @@ def main():
             loss_dict["mse"] = torch.tensor(0, device=device)
             total_mse_tokens = torch.tensor(0, device=device)
 
+        for key, value in loss_dict.items():
+            if key not in accum_loss_dict:
+                accum_loss_dict[key] = 0.0
+            accum_loss_dict[key] += value.item()
+        accum_ce_tokens += total_ce_tokens.item()
+        accum_mse_tokens += total_mse_tokens.item()
+        accum_count += 1
+
         loss = loss / training_args.gradient_accumulation_steps
         loss.backward()
 
@@ -1395,7 +1506,8 @@ def main():
             optimizer.zero_grad()
         
         # Log loss values:
-        if curr_step % training_args.log_every == 0:
+        if (curr_step % training_args.log_every == 0
+            and (micro_step + 1) % training_args.gradient_accumulation_steps == 0):
             total_samples = torch.tensor(len(data['sample_lens']), device=device)
             dist.all_reduce(total_samples, op=dist.ReduceOp.SUM)
 
@@ -1412,24 +1524,23 @@ def main():
             mfu_value = actual_tflops / peak_total_tflops if peak_total_tflops > 0 else 0.0
             message = f"(step={curr_step:07d}) "
             wandb_log = {}
-            for key, value in loss_dict.items():
-                # Reduce loss history over all processes:
-                avg_loss = torch.tensor(value.item(), device=device)
+            for key in accum_loss_dict:
+                avg_loss = torch.tensor(accum_loss_dict[key] / accum_count, device=device)
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 message += f"Train Loss {key}: {avg_loss:.4f}, "
                 wandb_log[key] = avg_loss
-            message += f"Train Steps/Sec: {steps_per_sec:.2f}, Tokens/Sec: {tokens_per_sec/1000:.2f}k, MFU: {mfu_value*100:.1f}%, "
+            message += f"Train Global Steps/Sec: {steps_per_sec:.2f}, Tokens/Sec: {tokens_per_sec/1000:.2f}k, MFU: {mfu_value*100:.1f}%, "
             if total_dataset_samples:
                 current_epoch = cumulative_samples * dist.get_world_size() / total_dataset_samples
-                message += f"Epoch: {current_epoch:.3f}, "
+                message += f"Epoch: {current_epoch:.3f}, Global processed Samples: {cumulative_samples * dist.get_world_size()}, Total Samples: {total_dataset_samples}, "
             logger.info(message)
             if dist.get_rank() == 0:
                 print(message, flush=True)
 
             wandb_log['train_lr'] = optimizer.param_groups[0]['lr']
-            wandb_log['train_total_mse_tokens'] = total_mse_tokens.item()
-            wandb_log['train_total_ce_tokens'] = total_ce_tokens.item()
+            wandb_log['train_total_mse_tokens'] = accum_mse_tokens
+            wandb_log['train_total_ce_tokens'] = accum_ce_tokens
             wandb_log['train_total_norm'] = total_norm.item()
             wandb_log['train_total_samples'] = total_samples.item()
             wandb_log['train_tokens_per_sec'] = tokens_per_sec
@@ -1447,10 +1558,14 @@ def main():
                 wandb_log['train_epoch'] = current_epoch
 
             if dist.get_rank() == 0:
-                wandb.log(wandb_log, step=curr_step)
+                wandb.log(wandb_log)
             start_time = time()
             token_window = 0.0
             seqlen_square_window = 0.0
+            accum_loss_dict = {}
+            accum_ce_tokens = 0
+            accum_mse_tokens = 0
+            accum_count = 0
 
         if data_status is None:
             data_status = {}
@@ -1483,10 +1598,9 @@ def main():
                     val_message += f"{k}={v:.4f} "
                 logger.info(val_message)
                 print(val_message, flush=True)
-                wandb.log(val_metrics, step=curr_step)
+                wandb.log(val_metrics)
                 fsdp_model.train()
-            if dist.get_world_size() > 1:
-                dist.barrier()
+        dist.barrier()
 
         # Inline generation validation
         if is_val_step and val_gen_prompts is not None:
@@ -1499,43 +1613,53 @@ def main():
                     device=device, logger=logger,
                 )
                 if gen_metrics:
-                    wandb.log(gen_metrics, step=curr_step)
+                    wandb.log(gen_metrics)
                 fsdp_model.train()
-            if dist.get_world_size() > 1:
-                dist.barrier()
+        dist.barrier()
 
         # Epoch-based checkpoint save
         if total_dataset_samples:
-            current_epoch_for_save = cumulative_samples * dist.get_world_size() / total_dataset_samples
+            # Synchronize cumulative_samples across ranks to avoid deadlock
+            # (each rank may count slightly different samples due to packing)
+            global_cumulative = torch.tensor(float(cumulative_samples), device=device)
+            dist.all_reduce(global_cumulative, op=dist.ReduceOp.SUM)
+            current_epoch_for_save = global_cumulative.item() / total_dataset_samples
             completed_epoch = int(current_epoch_for_save)
-            if completed_epoch > last_saved_epoch and completed_epoch > 0:
+            if completed_epoch > last_saved_epoch and completed_epoch > 0: # 바뀌는 시점에 저장
                 last_saved_epoch = completed_epoch
                 logger.info(f"Epoch {completed_epoch} completed at step {curr_step}, saving checkpoint...")
                 _do_checkpoint_save(
                     training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
                     data_status, fsdp_config, curr_step, logger,
                     save_name=f"epoch{completed_epoch}",
+                    global_cumulative_samples=global_cumulative.item(),
                 )
 
         # Step-based checkpoint save
         if curr_step > 0 and curr_step % training_args.save_every == 0:
-            epoch_int = int(cumulative_samples * dist.get_world_size() / total_dataset_samples) if total_dataset_samples else 0
+            global_cumulative = torch.tensor(float(cumulative_samples), device=device)
+            dist.all_reduce(global_cumulative, op=dist.ReduceOp.SUM)
+            epoch_int = int(global_cumulative.item() / total_dataset_samples) if total_dataset_samples else 0
             save_name = f"epoch{epoch_int}-step{curr_step}"
             _do_checkpoint_save(
                 training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
                 data_status, fsdp_config, curr_step, logger,
                 save_name=save_name,
+                global_cumulative_samples=global_cumulative.item(),
             )
 
     # Save final checkpoint if not already saved
     if curr_step > 0:
         logger.info(f"Saving final checkpoint at step {curr_step}...")
-        epoch_int = int(cumulative_samples * dist.get_world_size() / total_dataset_samples) if total_dataset_samples else 0
+        global_cumulative = torch.tensor(float(cumulative_samples), device=device)
+        dist.all_reduce(global_cumulative, op=dist.ReduceOp.SUM)
+        epoch_int = int(global_cumulative.item() / total_dataset_samples) if total_dataset_samples else 0
         save_name = f"epoch{epoch_int}-step{curr_step}"
         _do_checkpoint_save(
             training_args, skip_fsdp, fsdp_model, optimizer, scheduler,
             data_status, fsdp_config, curr_step, logger,
             save_name=save_name,
+            global_cumulative_samples=global_cumulative.item(),
         )
         logger.info(f"Final checkpoint saved at step {curr_step}")
     

@@ -3,6 +3,7 @@
 
 import functools
 import os
+import re
 
 import torch
 import torch.distributed as dist
@@ -123,6 +124,7 @@ class FSDPCheckpoint:
         fsdp_config,
         use_lora=False,
         save_name=None,
+        global_cumulative_samples=0,
     ):
         if save_name is None:
             save_name = f"step{train_steps}"
@@ -148,11 +150,12 @@ class FSDPCheckpoint:
             model_state_dict = model.state_dict()
             if dist.get_rank() == 0:
                 if use_lora:
-                    # Save only LoRA adapter weights
-                    lora_state_dict = {
-                        k: v for k, v in model_state_dict.items()
-                        if "lora_" in k or "modules_to_save" in k
-                    }
+                    # Save only LoRA adapter weights, stripping .default. from keys
+                    # so they match the format expected by PeftModel.from_pretrained
+                    lora_state_dict = {}
+                    for k, v in model_state_dict.items():
+                        if "lora_" in k or "modules_to_save" in k:
+                            lora_state_dict[k.replace(".default.", ".")] = v
                     save_file(lora_state_dict, os.path.join(save_path, "adapter_model.safetensors"))
                     # Save adapter_config.json via peft
                     peft_model = model.module if hasattr(model, 'module') else model
@@ -190,6 +193,9 @@ class FSDPCheckpoint:
 
         if dist.get_rank() == 0 and data_status is not None:
             torch.save(data_status, os.path.join(save_path, "data_status.pt"))
+
+        if dist.get_rank() == 0:
+            torch.save(global_cumulative_samples, os.path.join(save_path, "global_cumulative_samples.pt"))
 
         dist.barrier()
         return
@@ -243,16 +249,34 @@ class FSDPCheckpoint:
             optimizer_state_dict_path = os.path.join(
                 resume_from, f"optimizer.{shard_index:05d}-of-{total_shards:05d}.pt"
             )
-            optimizer_state_dict = torch.load(optimizer_state_dict_path, map_location="cpu", weights_only=True)
-            optimizer.load_state_dict(optimizer_state_dict)
-            del optimizer_state_dict
+            if not os.path.exists(optimizer_state_dict_path):
+                fallback = os.path.join(resume_from, "optimizer.00000-of-00001.pt")
+                if os.path.exists(fallback):
+                    optimizer_state_dict_path = fallback
+
+            if os.path.exists(optimizer_state_dict_path):
+                print("=" * 50)
+                print(f"Loading optimizer state dict from {optimizer_state_dict_path}")
+                print("=" * 50)
+                optimizer_state_dict = torch.load(optimizer_state_dict_path, map_location="cpu", weights_only=True)
+                optimizer.load_state_dict(optimizer_state_dict)
+                del optimizer_state_dict
 
             scheduler_state_dict_path = os.path.join(resume_from, "scheduler.pt")
-            scheduler_state_dict = torch.load(scheduler_state_dict_path, weights_only=True, map_location="cpu")
-            scheduler.load_state_dict(scheduler_state_dict)
-            del scheduler_state_dict
+            if os.path.exists(scheduler_state_dict_path):
+                print("=" * 50)
+                print(f"Loading scheduler state dict from {scheduler_state_dict_path}")
+                print("=" * 50)
+                scheduler_state_dict = torch.load(scheduler_state_dict_path, weights_only=True, map_location="cpu")
+                scheduler.load_state_dict(scheduler_state_dict)
+                del scheduler_state_dict
 
-            train_steps = int(os.path.basename(os.path.normpath(resume_from))) + 1
+            ckpt_name = os.path.basename(os.path.normpath(resume_from))
+            m = re.search(r'step(\d+)', ckpt_name)
+            if m:
+                train_steps = int(m.group(1)) + 1
+            else:
+                train_steps = int(ckpt_name) + 1
             """
             data_status = [
                 {
@@ -272,10 +296,21 @@ class FSDPCheckpoint:
                     data_status = None
             else:
                 data_status = None
+
+            gcs_path = os.path.join(resume_from, "global_cumulative_samples.pt")
+            if os.path.exists(gcs_path):
+                global_cumulative_samples = torch.load(gcs_path, weights_only=True, map_location="cpu")
+            else:
+                global_cumulative_samples = 0
+
+            m_epoch = re.search(r'epoch(\d+)', ckpt_name)
+            last_saved_epoch = int(m_epoch.group(1)) if m_epoch else -1
         else:
             train_steps = 0
             data_status = None
-        return optimizer, scheduler, train_steps, data_status
+            global_cumulative_samples = 0
+            last_saved_epoch = -1
+        return optimizer, scheduler, train_steps, data_status, global_cumulative_samples, last_saved_epoch
 
 
 def grad_checkpoint_check_fn(module):
