@@ -300,7 +300,7 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 answer = data_item['answer']
                 question = "Extract all text from the image."
                 image = generate_ocr_image('# ' + answer, template="random", width=self.und_image_size, height=self.und_image_size, quality=100)
-            elif task in ['pointing', 'position']:
+            elif task in ['pointing', 'position', 'rel_position']:
                 question = data_item.get('question', data_item.get('text', ''))
                 answer = str(data_item.get('answer', data_item.get('label', '')))
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
@@ -429,7 +429,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -858,7 +858,7 @@ class Solver(FinetuneSolverBase):
                     f"{answer}") if answer else "Generate an image."
                 self.validation_prompts.append(caption)
                 
-        elif self.args.task == 'position':
+        elif self.args.task in ['position', 'rel_position']:
             val_ds = self.val_ds
             rng = random.Random(42)
             indices = rng.sample(range(len(val_ds)), min(10, len(val_ds))) # 최대 10개 샘플링
@@ -1016,7 +1016,7 @@ class Solver(FinetuneSolverBase):
             return self._load_ocr_dataset()
         elif self.args.task == 'ocr_synthetic':
             return self._load_synthetic_ocr_dataset()
-        elif self.args.task == 'position':
+        elif self.args.task in ['position', 'rel_position']:
             return self._load_position_dataset()
         else:
             return self._load_counting_pointing_dataset()
@@ -1024,9 +1024,14 @@ class Solver(FinetuneSolverBase):
 
     def _load_position_dataset(self):
         print("[Solver] Loading Position Dataset...")
-        train_ds = load_dataset("heez/quadrant-position-new", split="train", streaming=False)
-
-        self.val_ds_stream = load_dataset("heez/quadrant-position-new", split="validation", streaming=False)
+        
+        if self.args.task == 'position':
+            train_ds = load_dataset("heez/quadrant-position-new", split="train", streaming=False)
+            self.val_ds_stream = load_dataset("heez/quadrant-position-new", split="validation", streaming=False)
+        elif self.args.task == 'rel_position':
+            train_ds = load_dataset("heez/relative-position-new", split="train", streaming=False)
+            self.val_ds_stream = load_dataset("heez/relative-position-new", split="validation", streaming=False)
+        
         self.val_ds = self.val_ds_stream
 
         # if self.args.count_upper_limit is not None:
@@ -1184,7 +1189,8 @@ class Solver(FinetuneSolverBase):
         local_rank = dist.get_rank() 
         world_size = dist.get_world_size()
         if self.global_rank == 0:
-            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on Quadrant Positioning...")
+            task_name = "Relative Positioning" if self.args.task == 'rel_position' else "Quadrant Positioning"
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on {task_name}...")
         
         self.model.eval()
         
@@ -1793,7 +1799,7 @@ class Solver(FinetuneSolverBase):
         if run_und and self.args.wandb_run_id is None:
             if self.args.task in ['ocr', 'ocr_synthetic']: # OCR
                 self.validate_ocr(self.start_epoch)
-            elif self.args.task == 'position':
+            elif self.args.task in ['position', 'rel_position']:
                 self.validate_position(self.start_epoch)
             else: # Counting, Pointing
                 self.validate(self.start_epoch, format="counting", split="train")
@@ -2134,7 +2140,7 @@ class Solver(FinetuneSolverBase):
                     if run_und:
                         if self.args.task in ['ocr', 'ocr_synthetic']:
                             self.validate_ocr(epoch)
-                        elif self.args.task == 'position':
+                        elif self.args.task in ['position', 'rel_position']:
                             self.validate_position(epoch)
                         else:
                             self.validate(epoch, split="train")

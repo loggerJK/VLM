@@ -30,7 +30,7 @@ dropout=0.05
 lora_rank=128
 max_seq_len=5120
 mode='und'
-exp_name="lora128_position_wohead_$mode"
+exp_name="lora128_rel_position_wohead_$mode"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
 
@@ -40,7 +40,7 @@ source .env
 mkdir -p "$output_dir"
 
 # Echo everything
-echo "==========Starting Position training (unified)...=========="
+echo "==========Starting Relative Position training (unified)...=========="
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES"
 echo "Learning Rate: $lr"
 echo "Weight Decay: $wd"
@@ -58,7 +58,7 @@ python -m torch.distributed.run \
     --nproc_per_node=${n_gpus} \
     --master_port=29506 \
     train/train_unified.py \
-    --task position \
+    --task rel_position \
     --mode $mode \
     --batch_size ${batchsize_per_gpu} \
     --accum_iter ${accum_iter} \
@@ -85,11 +85,11 @@ python -m torch.distributed.run \
     --use_wandb \
     --wandb_project "lumina-position" \
     --wandb_run_name $exp_name \
-    --wandb_run_id "avowj5o1" \
-    --resume_path "/mnt/data1/jiwon/Lumina-DiMOO/output/lora128_position_wohead_und/epoch0-iter47999-step1500" \
     --use_lora \
     --lora_rank ${lora_rank} \
     --ckpt_max_keep ${ckpt_max_keep} \
     --wo_lm_head \
     --eval_everything \
     2>&1 | tee "$output_dir/output.log"
+    # --wandb_run_id "avowj5o1" \
+    # --resume_path "/mnt/data1/jiwon/Lumina-DiMOO/output/lora128_position_wohead_und/epoch0-iter47999-step1500" \
