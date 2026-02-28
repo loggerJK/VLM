@@ -141,6 +141,7 @@ def train(attn_implementation="flash_attention_2"):
                 "up_proj", "down_proj", "gate_proj",
             ],
             bias="none",
+            exclude_modules=".*visual.*", 
             task_type=TaskType.CAUSAL_LM,
         )
         model = get_peft_model(model, lora_config)

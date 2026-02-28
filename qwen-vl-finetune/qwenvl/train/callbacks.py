@@ -17,6 +17,32 @@ from qwen_vl_utils import process_vision_info
 
 logger = logging.getLogger(__name__)
 
+def extract_number_fixed(text):
+    """Extract number from text pattern **number**, number, or English words (zero-nine)."""
+    text = text.lower()
+    
+    # 1. Try **number**
+    match = re.search(r"\*\*(\d+)\*\*", text)
+    if match:
+        return int(match.group(1))
+    
+    # 2. Try English words (zero to nine)
+    word_to_num = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10
+    }
+    for word, num in word_to_num.items():
+        # Match whole word to avoid partial matches (e.g. 'one' in 'bone')
+        if re.search(r"\b" + word + r"\b", text):
+            return num
+
+    # 3. Try plain digits
+    match = re.search(r"(\d+)", text)
+    if match:
+        return int(match.group(1))
+        
+    return -1
 
 def _is_main_process():
     if not dist.is_initialized():
@@ -103,32 +129,6 @@ class QwenValidationCallback(TrainerCallback):
         finally:
             model.train()
             
-    def extract_number_fixed(text):
-        """Extract number from text pattern **number**, number, or English words (zero-nine)."""
-        text = text.lower()
-        
-        # 1. Try **number**
-        match = re.search(r"\*\*(\d+)\*\*", text)
-        if match:
-            return int(match.group(1))
-        
-        # 2. Try English words (zero to nine)
-        word_to_num = {
-            'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
-            'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
-            'ten': 10
-        }
-        for word, num in word_to_num.items():
-            # Match whole word to avoid partial matches (e.g. 'one' in 'bone')
-            if re.search(r"\b" + word + r"\b", text):
-                return num
-
-        # 3. Try plain digits
-        match = re.search(r"(\d+)", text)
-        if match:
-            return int(match.group(1))
-            
-        return -1
 
     @torch.no_grad()
     def _validate_counting(self, model, step):
@@ -196,8 +196,8 @@ class QwenValidationCallback(TrainerCallback):
             #     gt_nums = re.findall(r"\d+", gt_answer)
             #     gt_num = gt_nums[0] if gt_nums else gt_answer
 
-            pred_num = self.extract_number_fixed(pred_text)
-            gt_num = self.extract_number_fixed(gt_answer)
+            pred_num = extract_number_fixed(pred_text)
+            gt_num = extract_number_fixed(gt_answer)
 
             is_correct = pred_num == gt_num
             if is_correct:
