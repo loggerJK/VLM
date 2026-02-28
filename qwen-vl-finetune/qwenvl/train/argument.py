@@ -24,6 +24,12 @@ class DataArguments:
     video_min_pixels: int = field(default=256 * 28 * 28)
     video_fps: float = 2
 
+    # HF dataset task fields
+    task: str = field(default="", metadata={"help": "Task name: 'counting' or 'ocr'"})
+    ocr_num_samples: int = field(default=200000, metadata={"help": "Number of OCR samples to use"})
+    ocr_image_width: int = field(default=512, metadata={"help": "Width of rendered OCR images"})
+    hf_data_path: str = field(default="", metadata={"help": "Optional local path override for HF datasets"})
+
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -43,3 +49,8 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_r: int = field(default=64)
     lora_alpha: int = field(default=128)
     lora_dropout: float = field(default=0.0)
+
+    ## HF task training fields
+    resume_checkpoint: Optional[str] = field(default=None, metadata={"help": "LoRA checkpoint path for resume"})
+    val_log_freq: int = field(default=500, metadata={"help": "Validation interval in steps (0=disabled)"})
+    save_steps_callback: int = field(default=500, metadata={"help": "Checkpoint save interval via callback"})

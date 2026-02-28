@@ -13,8 +13,8 @@ llm=Qwen/Qwen2.5-VL-7B-Instruct  # Using HuggingFace model ID
 
 # Training hyperparameters
 lr=2e-7
-batch_size=4
-grad_accum_steps=4
+batch_size=1
+grad_accum_steps=128
 
 # Training entry point
 entry_file=qwenvl/train/train_qwen.py
@@ -23,7 +23,7 @@ entry_file=qwenvl/train/train_qwen.py
 datasets=public_dataset1,public_dataset2
 
 # Output configuration
-run_name="qwen2vl-baseline"
+run_name="qwen2vl-counting"
 output_dir=./output
 
 # Training arguments
