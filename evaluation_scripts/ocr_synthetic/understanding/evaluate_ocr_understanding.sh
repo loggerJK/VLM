@@ -1,12 +1,22 @@
 #!/bin/bash
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5
 
 NGPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
 
-base_dir="/mnt/data1"
+# 사용자 아이디에 따른 HF_HOME 설정
+if echo $USER | grep -q "cvlab17"; then
+    echo "Running on cvlab17"
+    data_dirname="cvlab22_data1"
+fi
+echo "data_dirname is set to $data_dirname"
+
+
+
+base_dir="/mnt/$data_dirname"
 # model_path="${base_dir}/jiwon/bagel_train/hf/BAGEL-7B-MoT"
-model_path="/mnt/data1/jiwon/BAGEL/models/BAGEL-7B-MoT"
+# model_path="/mnt/$data_dirname/jiwon/BAGEL/models/BAGEL-7B-MoT"
+model_path="/home/cvlab17/models/BAGEL-7B-MoT"
 checkpoint_base="${base_dir}/jiwon/bagel_train/checkpoints"
 output_base="${base_dir}/dvlm/BAGEL/ocr_synthetic/understanding"
 
@@ -14,7 +24,7 @@ NUM_SAMPLES=250
 MAX_NEW_TOKENS=128
 
 # Add bagel_train to PYTHONPATH
-export PYTHONPATH=/mnt/data1/jiwon/bagel_train:${PYTHONPATH:-}
+export PYTHONPATH=/mnt/${data_dirname:-data1}/jiwon/bagel_train:${PYTHONPATH:-}
 
 # ---------------------------------------------------------------------------- #
 #                                   Baseline                                   #
@@ -37,36 +47,34 @@ echo "========================================"
 #                              Checkpoint sweep                                #
 # ---------------------------------------------------------------------------- #
 
+# checkpoint_base="/mnt/data1/dvlm/BAGEL"
 ckpt_list=(
     # Add your LoRA checkpoint relative paths here, e.g.:
-    "lora128_counting_und/epoch1"
-    "lora128_counting_und/epoch2"
-    "lora128_counting_und/epoch3"
-    "epoch0-step100/"
-    "epoch0-step200/"
-    "epoch0-step300/"
-    "epoch0-step400/"
-    "epoch0-step500/"
-    "epoch0-step600/"
-    "epoch0-step700/"
-    "epoch1-step1000/"
-    "epoch1-step1100/"
-    "epoch1-step1200/"
-    "epoch1-step1300/"
-    "epoch1-step1400/"
-    "epoch1-step800/"
-    "epoch1-step900/"
-    "epoch2-step1500/"
-    "epoch2-step1600/"
-    "epoch2-step1700/"
-    "epoch2-step1800/"
-    "epoch2-step1900/"
-    "epoch2-step2000/"
-    "epoch2-step2100/"
-    "epoch2-step2200/"
-    "epoch3-step2300/"
-    "epoch3-step2400/"
-    "epoch3-step2500/"
+    "ocr_synthetic_gen/epoch0-step100/"
+    # "ocr_synthetic_gen/epoch0-step200/"
+    # "ocr_synthetic_gen/epoch0-step300/"
+    # "ocr_synthetic_gen/epoch0-step400/"
+    # "ocr_synthetic_gen/epoch0-step500/"
+    # "ocr_synthetic_gen/epoch0-step600/"
+    # "ocr_synthetic_gen/epoch0-step700/"
+    # "ocr_synthetic_gen/epoch1-step1000/"
+    # "ocr_synthetic_gen/epoch1-step1100/"
+    # "ocr_synthetic_gen/epoch1-step1200/"
+    # "ocr_synthetic_gen/epoch1-step1300/"
+    # "ocr_synthetic_gen/epoch1-step1400/"
+    # "ocr_synthetic_gen/epoch1-step800/"
+    # "ocr_synthetic_gen/epoch1-step900/"
+    # "ocr_synthetic_gen/epoch2-step1500/"
+    # "ocr_synthetic_gen/epoch2-step1600/"
+    # "ocr_synthetic_gen/epoch2-step1700/"
+    # "ocr_synthetic_gen/epoch2-step1800/"
+    # "ocr_synthetic_gen/epoch2-step1900/"
+    # "ocr_synthetic_gen/epoch2-step2000/"
+    # "ocr_synthetic_gen/epoch2-step2100/"
+    # "ocr_synthetic_gen/epoch2-step2200/"
+    # "ocr_synthetic_gen/epoch3-step2300/"
+    # "ocr_synthetic_gen/epoch3-step2400/"
+    # "ocr_synthetic_gen/epoch3-step2500/"
 )
 
 for ckpt in "${ckpt_list[@]}"; do

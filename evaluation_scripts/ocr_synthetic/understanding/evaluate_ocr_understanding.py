@@ -24,7 +24,7 @@ from datetime import timedelta
 from PIL import Image
 from tqdm import tqdm
 from datasets import load_dataset
-from transformers import set_seed
+from transformers.trainer_utils import set_seed
 from modeling.autoencoder import load_ae
 from data.transforms import ImageTransform
 
@@ -264,7 +264,8 @@ def main():
     # LoRA loading (applied to entire Bagel model)
     if args.lora_ckpt_path is not None:
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, args.lora_ckpt_path, is_trainable=False, torch_device='cpu')
+        # model = PeftModel.from_pretrained(model, args.lora_ckpt_path, is_trainable=False, torch_device='cpu')
+        model.load_adapter(args.lora_ckpt_path)
         model = model.to(torch.bfloat16).to(device).eval()
         model = model.eval()
         if rank == 0:

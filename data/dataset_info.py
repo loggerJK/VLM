@@ -8,6 +8,7 @@ from .hf_dataset import (
     HFCountingUndDataset, HFCountingGenDataset,
     HFOCRUndDataset, HFOCRGenDataset,
     HFSyntheticOCRUndDataset, HFSyntheticOCRGenDataset,
+    HFCelebUndDataset,
 )
 
 
@@ -21,6 +22,7 @@ DATASET_REGISTRY = {
     'ocr_gen': HFOCRGenDataset,
     'ocr_synthetic_und': HFSyntheticOCRUndDataset,
     'ocr_synthetic_gen': HFSyntheticOCRGenDataset,
+    'celeb_und': HFCelebUndDataset,
 }
 
 
@@ -65,5 +67,8 @@ DATASET_INFO = {
     },
     'ocr_synthetic_gen': {
         'sentences': {'data_dir': ''},
+    },
+    'celeb_und': {
+        'celeb': {'data_dir': ''},
     },
 }

@@ -34,6 +34,20 @@ from datetime import timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from eval.vlm.utils import load_model_and_tokenizer, build_transform
 
+# Add bagel_train root to sys.path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+from eval.vlm.utils import build_transform
+from accelerate import init_empty_weights
+from safetensors.torch import load_file
+from modeling.bagel import (
+    BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM,
+    SiglipVisionConfig, SiglipVisionModel,
+)
+from modeling.qwen2 import Qwen2Tokenizer
+from data.data_utils import add_special_tokens
+
+
+torch.set_grad_enabled(False)
 
 def load_done_indices(jsonl_path):
     """Load set of already-processed indices from a JSONL file."""
@@ -165,17 +179,57 @@ def main():
         print(f"Error loading dataset: {e}")
         return
 
-    # Load BAGEL Model
+    # Load BAGEL Model — memory-efficient: meta tensors + direct GPU load
     print(f"[Rank {rank}] Loading BAGEL model from {args.model_path}...")
-    model, tokenizer, new_token_ids = load_model_and_tokenizer(args)
-    model = model.to(device)  # Ensure model is on correct rank device
+
+    # LLM config preparing
+    llm_config = Qwen2Config.from_json_file(os.path.join(args.model_path, "llm_config.json"))
+    llm_config.qk_norm = True
+    llm_config.tie_word_embeddings = False
+    llm_config.layer_module = "Qwen2MoTDecoderLayer"
+
+    # ViT config preparing
+    vit_config = SiglipVisionConfig.from_json_file(os.path.join(args.model_path, "vit_config.json"))
+    vit_config.rope = False
+    vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
+
+    # VAE loading
+    vae_model, vae_config = load_ae(local_path=os.path.join(args.model_path, "ae.safetensors"))
+
+    # Bagel config preparing
+    config = BagelConfig(
+        visual_gen=True,
+        visual_und=True,
+        llm_config=llm_config, 
+        vit_config=vit_config,
+        vae_config=vae_config,
+        vit_max_num_patch_per_side=70,
+        connector_act='gelu_pytorch_tanh',
+        latent_patch_size=2,
+        max_latent_size=64,
+    )
+
+    with init_empty_weights():
+        language_model = Qwen2ForCausalLM(llm_config)
+        vit_model = SiglipVisionModel(vit_config)
+        model = Bagel(language_model, vit_model, config)
+        model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
+
+    # Load weights directly to rank's GPU — no CPU intermediate copy
+    state_dict = load_file(os.path.join(args.model_path, "ema.safetensors"), device=str(device))
+    msg = model.load_state_dict(state_dict, strict=False, assign=True)
+    print(msg)
+    del state_dict
+
+    model = model.to(torch.bfloat16).to(device).eval()
     image_transform = build_transform()
 
     # LoRA loading (applied to entire Bagel model)
     if args.lora_ckpt_path is not None:
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, args.lora_ckpt_path, is_trainable=False)
-        model = model.to(device).eval()
+        # model = PeftModel.from_pretrained(model, args.lora_ckpt_path, is_trainable=False, torch_device='cpu')
+        model.load_adapter(args.lora_ckpt_path)
+        model = model.to(torch.bfloat16).to(device).eval()
         if rank == 0:
             print(f"Loaded LoRA weights from {args.lora_ckpt_path}")
 

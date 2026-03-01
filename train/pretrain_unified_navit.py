@@ -553,8 +553,18 @@ def build_task_dataset_meta(task, mode, hf_dataset_path=None):
                 "weight": 1,
             }
 
+    elif task == "celeb":
+        if mode in ("und", "both"):
+            dataset_meta["celeb_und"] = {
+                "dataset_names": ["celeb"],
+                "image_transform_args": dict(UND_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+
     else:
-        raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, or ocr_synthetic.")
+        raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, ocr_synthetic, or celeb.")
 
     if not dataset_meta:
         raise ValueError(f"No datasets configured for task={task!r}, mode={mode!r}")
@@ -591,6 +601,12 @@ def _load_validation_dataset(task, mode, hf_dataset_path=None, num_samples=100):
         ds = ds.select(range(n))
         return ds
 
+    elif task == "celeb":
+        ds = hf_load_dataset("heez/celeb-recognition", split="test")
+        n = min(num_samples, len(ds))
+        ds = ds.select(range(n))
+        return ds
+
     return None
 
 
@@ -616,6 +632,10 @@ def _setup_val_gen_prompts(val_ds, task, num_prompts=5):
                 "A clean image with sharp, legible black text on white background. "
                 f"The text reads: {answer}"
             )
+        elif task == "celeb":
+            persons = ["Heidi", "Samuel", "Elizabeth", "Benjamin", "Gabriel", "Julian"]
+            prompts = [f"Generate an image of {p}." for p in persons for _ in range(2)]
+            return prompts
         else:
             caption = "A beautiful landscape photograph."
         prompts.append(caption)
@@ -840,6 +860,10 @@ def validate_understanding(
                     width=512, height=512, quality=100,
                 )
                 image = pil_img2rgb(image)
+            elif task == "celeb":
+                image = pil_img2rgb(item["image"])
+                question = item.get("question", "")
+                answer_gt = str(item.get("answer", ""))
             else:
                 continue
 
@@ -856,6 +880,9 @@ def validate_understanding(
                 if pred_num == gt_num:
                     correct += 1
                 mad_sum += abs(pred_num - gt_num)
+            elif task == "celeb":
+                if pred.strip().lower() == answer_gt.strip().lower():
+                    correct += 1
             else:
                 # OCR: exact match + collect for nltk metrics
                 if pred.strip().lower() == answer_gt.strip().lower():
