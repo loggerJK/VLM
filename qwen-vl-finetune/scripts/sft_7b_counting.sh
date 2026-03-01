@@ -5,12 +5,13 @@
 # No DeepSpeed — plain DDP with 8-bit AdamW
 
 # GPU configuration
+source ./.env
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"7"}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"4,5,6,7"}  # Set this to the GPUs you want to use, e.g., "0,1,2,3"
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 
 # effective_batch = per_device_batch * grad_accum * NUM_GPUS = 128
-EFFECTIVE_BATCH=2
+EFFECTIVE_BATCH=128
 PER_DEVICE_BATCH=1
 GRAD_ACCUM=$((EFFECTIVE_BATCH / PER_DEVICE_BATCH / NUM_GPUS))
 
@@ -32,10 +33,10 @@ torchrun --nproc_per_node=${NUM_GPUS} \
     --lora_dropout 0.1 \
     --optim adamw_bnb_8bit \
     --bf16 \
-    --num_train_epochs 3 \
+    --num_train_epochs 20 \
     --per_device_train_batch_size ${PER_DEVICE_BATCH} \
     --gradient_accumulation_steps ${GRAD_ACCUM} \
-    --learning_rate 2e-7 \
+    --learning_rate 2e-5 \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --weight_decay 0 \
