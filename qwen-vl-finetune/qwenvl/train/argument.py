@@ -25,7 +25,7 @@ class DataArguments:
     video_fps: float = 2
 
     # HF dataset task fields
-    task: str = field(default="", metadata={"help": "Task name: 'counting' or 'ocr'"})
+    task: str = field(default="", metadata={"help": "Task name: 'counting', 'ocr', or 'celeb'"})
     ocr_num_samples: int = field(default=200000, metadata={"help": "Number of OCR samples to use"})
     ocr_image_width: int = field(default=512, metadata={"help": "Width of rendered OCR images"})
     hf_data_path: str = field(default="", metadata={"help": "Optional local path override for HF datasets"})

@@ -234,3 +234,62 @@ class HFOCRSyntheticDataset(Dataset):
         data_dict = _tokenize_and_label(messages, self.processor)
         data_dict = _compute_position_ids(data_dict, self.get_rope_index, self.merge_size)
         return data_dict
+
+
+class HFCelebDataset(Dataset):
+    """Dataset for celebrity recognition task using heez/celeb-recognition from HuggingFace."""
+
+    def __init__(self, processor, data_args):
+        super().__init__()
+
+        rank0_print("Loading celeb dataset: heez/celeb-recognition")
+        hf_path = data_args.hf_data_path if data_args.hf_data_path else "heez/celeb-recognition"
+        self.dataset = load_dataset(hf_path, split="train")
+        rank0_print(f"Celeb dataset: {len(self.dataset)} samples")
+
+        processor = update_processor_pixels(processor, data_args)
+        self.processor = processor
+        self.data_args = data_args
+        self.merge_size = getattr(processor.image_processor, "merge_size", 2)
+        self.get_rope_index = _get_rope_fn(data_args.model_type)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        for attempt in range(3):
+            try:
+                return self._get_item(i)
+            except Exception as e:
+                logger.warning(f"[Celeb Try #{attempt}] Failed sample {i}: {e}")
+                time.sleep(1)
+
+        return self._get_item(i)
+
+    def _get_item(self, i) -> Dict[str, torch.Tensor]:
+        sample = self.dataset[i]
+
+        pil_image = sample["image"]
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+
+        question = str(sample["question"])
+        answer = str(sample["answer"])
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": pil_image},
+                    {"type": "text", "text": question},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": answer}],
+            },
+        ]
+
+        data_dict = _tokenize_and_label(messages, self.processor)
+        data_dict = _compute_position_ids(data_dict, self.get_rope_index, self.merge_size)
+        return data_dict

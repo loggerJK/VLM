@@ -124,6 +124,8 @@ class QwenValidationCallback(TrainerCallback):
                 self._validate_counting(model, step)
             elif self.task == "ocr":
                 self._validate_ocr(model, step)
+            elif self.task == "celeb":
+                self._validate_celeb(model, step)
         except Exception as e:
             logger.warning(f"Validation failed at step {step}: {e}")
         finally:
@@ -325,5 +327,87 @@ class QwenValidationCallback(TrainerCallback):
                     data=[[p["gt"], p["pred"], p["exact"]] for p in predictions[:20]],
                 )
                 wandb.log({"val/predictions": table}, step=step)
+        except ImportError:
+            pass
+
+    @torch.no_grad()
+    def _validate_celeb(self, model, step):
+        from datasets import load_dataset
+
+        ds = load_dataset(
+            "heez/celeb-recognition", split="test", streaming=True
+        )
+
+        correct = 0
+        total = 0
+        predictions = []
+        device = next(model.parameters()).device
+        unwrapped = model.module if hasattr(model, "module") else model
+
+        for sample in ds:
+            if total >= 100:
+                break
+
+            pil_image = sample["image"]
+            if pil_image.mode != "RGB":
+                pil_image = pil_image.convert("RGB")
+
+            question = str(sample.get("question", ""))
+            gt_answer = str(sample.get("answer", ""))
+
+            if not question or not gt_answer:
+                continue
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_image},
+                        {"type": "text", "text": question},
+                    ],
+                }
+            ]
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, _ = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text], images=image_inputs, return_tensors="pt"
+            ).to(device)
+
+            output_ids = unwrapped.generate(**inputs, max_new_tokens=50, do_sample=False)
+            generated = output_ids[0][inputs["input_ids"].shape[1]:]
+            pred_text = self.processor.decode(generated, skip_special_tokens=True).strip()
+
+            is_correct = pred_text.strip().lower() == gt_answer.strip().lower()
+            if is_correct:
+                correct += 1
+            total += 1
+
+            print("=" * 50)
+            print(f"[GT]")
+            print(f"{gt_answer}")
+            print(f"[Prediction]")
+            print(f"{pred_text}")
+
+            predictions.append({
+                "question": question,
+                "gt": gt_answer,
+                "pred": pred_text,
+                "correct": is_correct,
+            })
+
+        accuracy = correct / total if total > 0 else 0.0
+        logger.info(f"[Step {step}] Celeb val accuracy: {accuracy:.4f} ({correct}/{total})")
+
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"val/celeb_accuracy": accuracy, "val/step": step}, step=step)
+                table = wandb.Table(
+                    columns=["question", "gt", "pred", "correct"],
+                    data=[[p["question"], p["gt"], p["pred"], p["correct"]] for p in predictions[:20]],
+                )
+                wandb.log({"val/celeb_predictions": table}, step=step)
         except ImportError:
             pass
