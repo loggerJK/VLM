@@ -275,7 +275,7 @@ class OCRSyntheticDataset(torch.utils.data.Dataset):
 def collate_fn(batch, processor, task="counting"):
     prepare_list = []
 
-    if task == 'ocr':
+    if task in ('ocr', 'celeb'):
         q_col, a_col = 'question', 'answer'
     else:  # counting
         q_col, a_col = 'question_count', 'answer_count'
@@ -628,15 +628,14 @@ class ValidationCallback(TrainerCallback):
         # if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
         if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
             if self.args.task == "counting":
-                if self.args.mode in ["und", "both"]:
-                    self.validate(model, state)
-                if self.args.mode in ["gen", "both"]:
-                    self.validate_generation(model, state)
+                self.validate(model, state)
+                self.validate_generation(model, state)
             elif self.args.task == "ocr":
-                if self.args.mode in ["und", "both"]:
-                    self.validate_ocr(model, state)
-                if self.args.mode in ["gen", "both"]:
-                    self.validate_ocr_generation(model, state)
+                self.validate_ocr(model, state)
+                self.validate_ocr_generation(model, state)
+            elif self.args.task == "celeb":
+                self.validate_celeb(model, state)
+                self.validate_celeb_generation(model, state)
 
     def on_epoch_end(self, args, state, control, model=None, **kwargs):
         if state.is_world_process_zero:
@@ -952,6 +951,133 @@ class ValidationCallback(TrainerCallback):
 
         model.train()
 
+    def validate_celeb(self, model, state):
+        """Celebrity recognition validation: image + question → answer, exact match accuracy."""
+        print(f"\n[Step {state.global_step}] Running Celebrity Recognition Validation...")
+        model.eval()
+        correct = 0
+        total = 0
+        eval_limit = 100
+
+        val_dataset_stream = load_dataset("heez/celeb-recognition", split="test", streaming=True)
+        eval_dataset = iter(val_dataset_stream)
+
+        if hasattr(model, "module"):
+            unwrap_model = model.module
+        else:
+            unwrap_model = model
+
+        device = next(unwrap_model.parameters()).device
+
+        import wandb
+
+        details_buffer = []
+
+        with torch.no_grad():
+            count = 0
+            progress = tqdm(range(eval_limit), desc="Celeb Validation", unit="sample")
+            for item in eval_dataset:
+                if count >= eval_limit:
+                    break
+
+                image = item.get('image')
+                question = item.get('question', '')
+                answer_gt = item.get('answer', '')
+                if image is None or not question or not answer_gt:
+                    continue
+
+                conversation = [
+                    {
+                        "role": "<|User|>",
+                        "content": f"<image_placeholder>\n{question}",
+                        "images": [image],
+                    },
+                    {"role": "<|Assistant|>", "content": ""},
+                ]
+
+                pil_images = [image]
+                prepare_inputs = self.processor(
+                    conversations=conversation, images=pil_images, force_batchify=True
+                ).to(device)
+
+                inputs_embeds = unwrap_model.prepare_inputs_embeds(**prepare_inputs)
+
+                outputs = unwrap_model.language_model.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=prepare_inputs.attention_mask,
+                    pad_token_id=self.processor.tokenizer.eos_token_id,
+                    max_new_tokens=50,
+                    do_sample=False,
+                    use_cache=True
+                )
+
+                answer = self.processor.tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
+                print("=========================================")
+                print(f"answer : {answer}, gt: {answer_gt}")
+
+                is_correct = answer.strip().lower() == answer_gt.strip().lower()
+                if is_correct:
+                    correct += 1
+                total += 1
+                count += 1
+
+                res_str = f"[{count}] GT: {answer_gt} | Pred: {answer.strip()} | Correct: {is_correct}"
+                details_buffer.append(res_str)
+
+                progress.update(1)
+            progress.close()
+
+        accuracy = correct / total if total > 0 else 0
+        print(f"Celeb Validation Accuracy: {accuracy:.4f} ({correct}/{total})")
+
+        if wandb.run is not None:
+            wandb.log({
+                "val/celeb_accuracy": accuracy,
+                "global_step": state.global_step,
+            })
+            table = wandb.Table(
+                columns=["Step", "Accuracy", "Details"],
+                data=[[state.global_step, accuracy, "\n".join(details_buffer)]],
+            )
+            wandb.log({"val/celeb_predictions": table})
+
+        model.train()
+
+    def validate_celeb_generation(self, model, state):
+        """Generate images of celebrities and log to wandb."""
+        print(f"\n[Step {state.global_step}] Running Celebrity Generation Validation...")
+        model.eval()
+
+        unwrap_model = model.module if hasattr(model, "module") else model
+
+        persons = ["Heidi", "Samuel", "Elizabeth", "Benjamin", "Gabriel", "Julian"]
+        prompts = [f"Generate an image of {p}." for p in persons for _ in range(2)]
+
+        gen_images = []
+        for prompt_text in prompts:
+            try:
+                pil_img = generate_image_from_prompt(
+                    model=unwrap_model,
+                    processor=self.processor,
+                    prompt_text=prompt_text,
+                    temperature=1.0,
+                    cfg_weight=5.0,
+                    img_size=self.args.gen_img_size,
+                )
+                gen_images.append(wandb.Image(pil_img, caption=prompt_text[:80]))
+            except Exception as e:
+                print(f"  Celeb generation validation error: {e}")
+                continue
+
+        if wandb.run is not None and gen_images:
+            wandb.log({
+                "val/celeb_generated_images": gen_images,
+                "global_step": state.global_step,
+            })
+            print(f"  Logged {len(gen_images)} celeb generated images to wandb")
+
+        model.train()
+
 def main():
     parser = argparse.ArgumentParser(description="Train Janus model for counting task")
     parser.add_argument("--tuning_mode", type=str, default="lora", help="Tuning mode: 'full' or 'lora'")
@@ -969,8 +1095,8 @@ def main():
     parser.add_argument("--lora_r", type=int, default=16, help="LoRA rank (if tuning_mode is 'lora')")
     parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (if tuning_mode is 'lora')")
     parser.add_argument("--task", type=str, default="counting",
-                        choices=["counting", "ocr"],
-                        help="Task domain: counting or ocr")
+                        choices=["counting", "ocr", "celeb"],
+                        help="Task domain: counting, ocr, or celeb")
     parser.add_argument("--ocr_num_samples", type=int, default=200000,
                         help="Number of samples from synthetic OCR dataset (BAGEL default: 200000)")
     parser.add_argument("--ocr_image_width", type=int, default=512,
@@ -1092,7 +1218,11 @@ def main():
             und_dataset = _maybe_wrap(und_raw_dataset)
             gen_dataset = _maybe_wrap(gen_raw_dataset)
             train_dataset = ConcatDataset([und_dataset, gen_dataset])
-    
+
+    elif args.task == "celeb":
+        raw_dataset = load_dataset("heez/celeb-recognition", split="train", num_proc=64)
+        train_dataset = _maybe_wrap(raw_dataset)
+
     print(f"Loading model from {args.model_path}...")
     processor = VLChatProcessor.from_pretrained(args.model_path)
     config = AutoConfig.from_pretrained(args.model_path)
