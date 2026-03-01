@@ -283,6 +283,8 @@ def collate_fn(batch, processor, task="counting"):
     for item in batch:
         image = item.get('image')
         if image is None: continue
+        if hasattr(image, 'convert'):
+            image = image.convert("RGB")
 
         conversation = [
             {
