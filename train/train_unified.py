@@ -305,6 +305,11 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 answer = str(data_item.get('answer', data_item.get('label', '')))
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
                 image = var_center_crop(image, crop_size_list=crop_size_list)
+            elif task == 'celeb':
+                question = data_item.get('question', '')
+                answer = str(data_item.get('answer', ''))
+                crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
+                image = var_center_crop(image, crop_size_list=crop_size_list)
             else:  # counting
                 question = data_item.get('question_count', data_item.get('text', ''))
                 answer = str(data_item.get('answer_count', data_item.get('label', '')))
@@ -429,7 +434,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position", "celeb"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -868,7 +873,11 @@ class Solver(FinetuneSolverBase):
                 item = val_ds[idx]
                 answer = item.get('answer', '')
                 self.validation_prompts.append(answer)
-        
+
+        elif self.args.task == 'celeb':
+            persons = ["Heidi", "Samuel", "Elizabeth", "Benjamin", "Gabriel", "Julian"]
+            self.validation_prompts = [f"Generate an image of {p}." for p in persons for _ in range(2)]
+
         else:
             if self.global_rank == 0:
                 print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
@@ -1018,6 +1027,8 @@ class Solver(FinetuneSolverBase):
             return self._load_synthetic_ocr_dataset()
         elif self.args.task in ['position', 'rel_position']:
             return self._load_position_dataset()
+        elif self.args.task == 'celeb':
+            return self._load_celeb_dataset()
         else:
             return self._load_counting_pointing_dataset()
         
@@ -1157,6 +1168,19 @@ class Solver(FinetuneSolverBase):
         self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
+
+    def _load_celeb_dataset(self):
+        print("[Solver] Loading Celebrity Recognition Dataset...")
+        train_ds = load_dataset("heez/celeb-recognition", split="train", streaming=False)
+        self.val_ds = load_dataset("heez/celeb-recognition", split="test", streaming=False)
+        self.val_ds_stream = self.val_ds
+
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+
+        train_und_ds = train_ds
+        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+
+        return HFDatasetWrapper(None, train_und_ds, item_processor, default_task='celeb', mode=self.args.mode)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
         print(f"[Solver] Creating starting point at {save_path}...")
@@ -1760,6 +1784,138 @@ class Solver(FinetuneSolverBase):
         dist.barrier()
         self.model.train()
 
+    @torch.no_grad()
+    def validate_celeb(self, epoch):
+        """Celebrity recognition validation with multi-GPU support."""
+        import gc
+
+        dist.barrier()
+        local_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        if self.global_rank == 0:
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Celebrity Recognition Validation...")
+
+        self.model.eval()
+
+        if not hasattr(self, 'vqvae'):
+            dtype = torch.bfloat16 if self.args.precision == "bf16" else torch.float32
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+            self.vqvae.eval()
+
+        correct = 0
+        total = 0
+        eval_limit = min(len(self.val_ds), self.args.validation_samples)
+
+        subset_indices = list(range(eval_limit))
+        local_dataset_list = []
+        for idx, i in enumerate(subset_indices):
+            if idx % world_size == local_rank:
+                local_dataset_list.append(self.val_ds[i])
+
+        if self.global_rank == 0:
+            print(f"[Celeb Validation] Total samples: {len(subset_indices)}, Per GPU: ~{len(subset_indices)//world_size}")
+
+        local_predictions = []
+        local_references = []
+        local_questions = []
+        local_images = []
+
+        with torch.no_grad():
+            disable_tqdm = (self.global_rank != 0)
+            progress = tqdm(range(len(local_dataset_list)), desc=f"[Rank {local_rank}] Celeb Validation", unit="sample", disable=disable_tqdm)
+
+            for idx, item in enumerate(local_dataset_list):
+                image = item.get('image')
+                question = item.get('question', '')
+                answer_gt = item.get('answer', '')
+
+                crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+
+                input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
+
+                instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
+                input_ids_raw = self.tokenizer(instruction)['input_ids']
+                input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                code_start = len(input_token) + 1
+                STEPS_LENGTH = 128
+                GEN_LENGTH = 128
+                BLOCK_LENGTH = 128
+                input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+                input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
+
+                out = generate_text_understanding(
+                    self.model, input_ids,
+                    steps=STEPS_LENGTH,
+                    gen_length=GEN_LENGTH,
+                    block_length=BLOCK_LENGTH,
+                    temperature=0.0,
+                    cfg_scale=0.0,
+                    remasking='low_confidence',
+                    code_start=code_start
+                )
+
+                pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
+
+                print("=" * 50)
+                print(f"Prediction: \n{pred_text}")
+                print(f"Ground Truth: \n{answer_gt}")
+
+                local_predictions.append(pred_text)
+                local_references.append(answer_gt)
+                local_questions.append(question)
+                local_images.append(image_processed)
+
+                if idx % 2 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                progress.update(1)
+            progress.close()
+
+        all_predictions = [None] * world_size
+        all_references = [None] * world_size
+        all_questions = [None] * world_size
+
+        dist.barrier()
+        dist.all_gather_object(all_predictions, local_predictions)
+        dist.all_gather_object(all_references, local_references)
+        dist.all_gather_object(all_questions, local_questions)
+
+        if self.global_rank == 0:
+            predictions = [p for sublist in all_predictions for p in sublist]
+            references = [r for sublist in all_references for r in sublist]
+            questions = [q for sublist in all_questions for q in sublist]
+
+            correct = sum(1 for p, r in zip(predictions, references) if p.strip().lower() == r.strip().lower())
+            total = len(predictions)
+            accuracy = correct / total if total > 0 else 0.0
+
+            print(f"[Celeb Validation] Step {self.global_step} Accuracy: {accuracy:.4f} ({correct}/{total})")
+
+            if self.args.use_wandb:
+                val_table = wandb.Table(columns=["Step", "Question", "GT", "Prediction", "Correct"])
+                for i in range(min(len(predictions), 20)):
+                    is_correct = predictions[i].strip().lower() == references[i].strip().lower()
+                    val_table.add_data(
+                        self.global_step,
+                        questions[i][:100],
+                        references[i],
+                        predictions[i],
+                        is_correct,
+                    )
+
+                wandb.log({
+                    "val/celeb_accuracy": accuracy,
+                    "val/celeb_samples": val_table,
+                    "global_step": self.global_step,
+                })
+
+        dist.barrier()
+        self.model.train()
+
     def run(self):
         # Check for NaNs in parameters
         print("[Solver] Checking model parameters for NaNs...")
@@ -1801,6 +1957,8 @@ class Solver(FinetuneSolverBase):
                 self.validate_ocr(self.start_epoch)
             elif self.args.task in ['position', 'rel_position']:
                 self.validate_position(self.start_epoch)
+            elif self.args.task == 'celeb':
+                self.validate_celeb(self.start_epoch)
             else: # Counting, Pointing
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
@@ -2142,6 +2300,8 @@ class Solver(FinetuneSolverBase):
                             self.validate_ocr(epoch)
                         elif self.args.task in ['position', 'rel_position']:
                             self.validate_position(epoch)
+                        elif self.args.task == 'celeb':
+                            self.validate_celeb(epoch)
                         else:
                             self.validate(epoch, split="train")
                             self.validate(epoch, split="val")
