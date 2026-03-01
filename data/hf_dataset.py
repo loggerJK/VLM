@@ -224,12 +224,12 @@ class HFCountingGenDataset(HFDatasetBase):
 
                     image_tensor = self.transform(image)
                     height, width = image_tensor.shape[1:]
-                    print(f"Image height: {height}, width: {width}")
+                    # print(f"Image height: {height}, width: {width}")
                     num_img_tokens = width * height // (transform_stride ** 2)
 
                     caption_ids = self.tokenizer.encode(caption)
                     num_tokens = len(caption_ids) + num_img_tokens
-                    print(f"Caption length (tokens): {len(caption_ids)}, Image tokens: {num_img_tokens}, Total: {num_tokens}")
+                    # print(f"Caption length (tokens): {len(caption_ids)}, Image tokens: {num_img_tokens}, Total: {num_tokens}")
 
                     sequence_plan = [
                         {"type": "text", "enable_cfg": 1, "loss": 0, "special_token_loss": 0, "special_token_label": None},
