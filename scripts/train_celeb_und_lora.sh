@@ -56,7 +56,7 @@ torchrun \
     --model_path /mnt/data1/jiwon/BAGEL/models/BAGEL-7B-MoT \
     --finetune_from_hf True \
     --layer_module Qwen2MoTDecoderLayer \
-    --use_flex True \ 
+    --use_flex True \
     --max_latent_size 64 \
     --sharding_strategy NO_SHARD \
     --num_shard 1 --num_replicate 1 \
