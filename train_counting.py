@@ -19,6 +19,8 @@ from tqdm import tqdm
 import wandb
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from tqdm import tqdm
+import random
+import time
 
 
 def extract_number(text):
@@ -233,6 +235,25 @@ class StreamingDatasetWrapper(torch.utils.data.IterableDataset):
             output_item = item.copy()
             output_item['image'] = image
             yield output_item
+
+class SafeMapDataset(torch.utils.data.Dataset):
+    """Wraps a map-style HF dataset with error handling for corrupted images."""
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, i):
+        for attempt in range(3):
+            try:
+                return self.dataset[i]
+            except Exception as e:
+                print(f"[SafeMapDataset Try #{attempt}] Failed sample {i}: {e}")
+                i = random.randint(0, len(self) - 1)
+                time.sleep(1)
+        return self.dataset[i]
+
 
 class OCRSyntheticDataset(torch.utils.data.Dataset):
     """agentlans/high-quality-english-sentences -> runtime image rendering"""
@@ -982,9 +1003,13 @@ class ValidationCallback(TrainerCallback):
                 if count >= eval_limit:
                     break
 
-                image = item.get('image')
-                question = item.get('question', '')
-                answer_gt = item.get('answer', '')
+                try:
+                    image = item.get('image')
+                    question = item.get('question', '')
+                    answer_gt = item.get('answer', '')
+                except Exception as e:
+                    print(f"[Celeb Val] Skipping corrupted sample: {e}")
+                    continue
                 if image is None or not question or not answer_gt:
                     continue
 
@@ -1223,7 +1248,7 @@ def main():
 
     elif args.task == "celeb":
         raw_dataset = load_dataset("heez/celeb-recognition", split="train", num_proc=64)
-        train_dataset = _maybe_wrap(raw_dataset)
+        train_dataset = SafeMapDataset(_maybe_wrap(raw_dataset))
 
     print(f"Loading model from {args.model_path}...")
     processor = VLChatProcessor.from_pretrained(args.model_path)
