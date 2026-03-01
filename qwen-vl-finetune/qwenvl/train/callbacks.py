@@ -348,9 +348,13 @@ class QwenValidationCallback(TrainerCallback):
             if total >= 100:
                 break
 
-            pil_image = sample["image"]
-            if pil_image.mode != "RGB":
-                pil_image = pil_image.convert("RGB")
+            try:
+                pil_image = sample["image"]
+                if pil_image.mode != "RGB":
+                    pil_image = pil_image.convert("RGB")
+            except Exception as e:
+                logger.warning(f"[Celeb Val] Skipping corrupted sample: {e}")
+                continue
 
             question = str(sample.get("question", ""))
             gt_answer = str(sample.get("answer", ""))

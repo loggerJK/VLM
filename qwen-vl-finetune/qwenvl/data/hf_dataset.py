@@ -6,6 +6,7 @@ existing DataCollator classes can be reused without modification.
 """
 
 import logging
+import random
 import time
 import torch
 from typing import Dict
@@ -262,6 +263,7 @@ class HFCelebDataset(Dataset):
                 return self._get_item(i)
             except Exception as e:
                 logger.warning(f"[Celeb Try #{attempt}] Failed sample {i}: {e}")
+                i = random.randint(0, len(self) - 1)
                 time.sleep(1)
 
         return self._get_item(i)
