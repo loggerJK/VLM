@@ -390,8 +390,17 @@ class HFDatasetWrapper(torch.utils.data.Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
+        for attempt in range(3):
+            try:
+                item = self.dataset[idx]
+                task = item.get('task', self.default_task) # Get task from item, fallback to default_task
+                return self.item_processor.process_item(item, training_mode=True, task=task)
+            except Exception as e:
+                print(f"[HFDataset Try #{attempt}] Failed sample {idx}: {e}")
+                idx = random.randint(0, len(self) - 1)
+                time.sleep(1)
         item = self.dataset[idx]
-        task = item.get('task', self.default_task) # Get task from item, fallback to default_task
+        task = item.get('task', self.default_task)
         return self.item_processor.process_item(item, training_mode=True, task=task)
 
 
@@ -1811,7 +1820,11 @@ class Solver(FinetuneSolverBase):
         local_dataset_list = []
         for idx, i in enumerate(subset_indices):
             if idx % world_size == local_rank:
-                local_dataset_list.append(self.val_ds[i])
+                try:
+                    local_dataset_list.append(self.val_ds[i])
+                except Exception as e:
+                    print(f"[Celeb Val] Skipping corrupted sample {i}: {e}")
+                    continue
 
         if self.global_rank == 0:
             print(f"[Celeb Validation] Total samples: {len(subset_indices)}, Per GPU: ~{len(subset_indices)//world_size}")
@@ -1826,51 +1839,56 @@ class Solver(FinetuneSolverBase):
             progress = tqdm(range(len(local_dataset_list)), desc=f"[Rank {local_rank}] Celeb Validation", unit="sample", disable=disable_tqdm)
 
             for idx, item in enumerate(local_dataset_list):
-                image = item.get('image')
-                question = item.get('question', '')
-                answer_gt = item.get('answer', '')
+                try:
+                    image = item.get('image')
+                    question = item.get('question', '')
+                    answer_gt = item.get('answer', '')
 
-                crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
-                image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+                    crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                    image_processed = var_center_crop(image, crop_size_list=crop_size_list)
 
-                input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
-                img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
+                    input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                    img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
 
-                instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
-                input_ids_raw = self.tokenizer(instruction)['input_ids']
-                input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
-                code_start = len(input_token) + 1
-                STEPS_LENGTH = 128
-                GEN_LENGTH = 128
-                BLOCK_LENGTH = 128
-                input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
-                input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
+                    instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
+                    input_ids_raw = self.tokenizer(instruction)['input_ids']
+                    input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                    code_start = len(input_token) + 1
+                    STEPS_LENGTH = 128
+                    GEN_LENGTH = 128
+                    BLOCK_LENGTH = 128
+                    input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+                    input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
 
-                out = generate_text_understanding(
-                    self.model, input_ids,
-                    steps=STEPS_LENGTH,
-                    gen_length=GEN_LENGTH,
-                    block_length=BLOCK_LENGTH,
-                    temperature=0.0,
-                    cfg_scale=0.0,
-                    remasking='low_confidence',
-                    code_start=code_start
-                )
+                    out = generate_text_understanding(
+                        self.model, input_ids,
+                        steps=STEPS_LENGTH,
+                        gen_length=GEN_LENGTH,
+                        block_length=BLOCK_LENGTH,
+                        temperature=0.0,
+                        cfg_scale=0.0,
+                        remasking='low_confidence',
+                        code_start=code_start
+                    )
 
-                pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
+                    pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
 
-                print("=" * 50)
-                print(f"Prediction: \n{pred_text}")
-                print(f"Ground Truth: \n{answer_gt}")
+                    print("=" * 50)
+                    print(f"Prediction: \n{pred_text}")
+                    print(f"Ground Truth: \n{answer_gt}")
 
-                local_predictions.append(pred_text)
-                local_references.append(answer_gt)
-                local_questions.append(question)
-                local_images.append(image_processed)
+                    local_predictions.append(pred_text)
+                    local_references.append(answer_gt)
+                    local_questions.append(question)
+                    local_images.append(image_processed)
 
-                if idx % 2 == 0:
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    if idx % 2 == 0:
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    print(f"[Celeb Val] Error processing sample {idx}: {e}")
+                    progress.update(1)
+                    continue
 
                 progress.update(1)
             progress.close()
