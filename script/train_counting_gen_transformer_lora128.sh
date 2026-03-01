@@ -16,7 +16,7 @@ RESUME_CKPT="${1:-}"
 # [설정] WandB API Key (.env 파일에서 로드)
 source ./.env
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 export WANDB_NAME="train[transformer_lora128]_mode[gen]_dset[heez_pixmo_point_count]"
 export WANDB_PROJECT="janus-counting"
@@ -37,8 +37,8 @@ LR=4e-5
 GRAD_ACCUM_STEPS=$((128 / NUM_GPUS))     # Gradient Accumulation Steps, Total 128
 USE_GRAD_CHECKPOINT=0  # 1=True, 0=False (메모리 절약)
 NUM_WORKERS=32          # Dataloader Workers
-SAVE_STEPS=500           # 매 n 스텝마다 체크포인트 저장
-LOG_FREQ=10             # 매 n 스텝마다 Validation
+SAVE_STEPS=100           # 매 n 스텝마다 체크포인트 저장
+LOG_FREQ=100             # 매 n 스텝마다 Validation
 USE_8BIT_ADAM=1          # 1=8bit AdamW (bitsandbytes), 0=기본 AdamW
 
 # WandB 로그인

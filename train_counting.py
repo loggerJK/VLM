@@ -592,7 +592,7 @@ class ValidationCallback(TrainerCallback):
         import random
         rng = random.Random(42)
 
-        val_ds = load_dataset("heez/pixmo-point-count-gen-und", split="val_gen")
+        val_ds = load_dataset("heez/pixmo-point-count-gen-und", split="val_gen", num_proc=64)
         num_prompts = 5
         indices = rng.sample(range(len(val_ds)), min(num_prompts, len(val_ds)))
 
@@ -609,8 +609,8 @@ class ValidationCallback(TrainerCallback):
             print(f"  {i+1}. {p}")
 
     def on_step_begin(self, args, state, control, model=None, **kwargs):
-        if state.global_step > 0 and state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
-        # if state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
+        # if state.global_step > 0 and state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
+        if state.global_step % self.args.save_steps == 0 and state.is_world_process_zero:
             checkpoint_dir = os.path.join(self.args.output_dir, f"epoch{int(state.epoch)}_step-{state.global_step}")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -625,8 +625,8 @@ class ValidationCallback(TrainerCallback):
                 if self.trainer.is_world_process_zero:
                     self.processor.save_pretrained(checkpoint_dir)
 
-        if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
-        # if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
+        # if state.global_step > 0 and state.global_step % self.log_freq == 0 and state.is_world_process_zero:
+        if state.global_step % self.log_freq == 0 and state.is_world_process_zero:
             if self.args.task == "counting":
                 if self.args.mode in ["und", "both"]:
                     self.validate(model, state)
