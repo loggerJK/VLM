@@ -21,6 +21,7 @@ from modeling.autoencoder import load_ae
 
 from PIL import Image
 from modeling.bagel.qwen2_navit import NaiveCache
+from tqdm import tqdm
 
 # disable grad
 torch.set_grad_enabled(False)
@@ -207,7 +208,7 @@ if __name__ == "__main__":
     local_indices = list(range(rank, len(metadatas), world_size))
     print(f"[Rank {rank}] Assigned {len(local_indices)}/{len(metadatas)} prompts")
 
-    for idx in local_indices:
+    for idx in tqdm(local_indices, desc=f"Rank {rank} Processing", unit="prompt"):
         metadata = metadatas[idx]
         outpath = os.path.join(output_dir, f"{idx:0>5}")
         os.makedirs(outpath, exist_ok=True)

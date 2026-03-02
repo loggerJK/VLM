@@ -1645,7 +1645,8 @@ def main():
         dist.barrier()
 
         # Epoch-based checkpoint save
-        if total_dataset_samples:
+        if (total_dataset_samples
+            and (micro_step + 1) % training_args.gradient_accumulation_steps == 0):
             # Synchronize cumulative_samples across ranks to avoid deadlock
             # (each rank may count slightly different samples due to packing)
             global_cumulative = torch.tensor(float(cumulative_samples), device=device)
@@ -1663,7 +1664,9 @@ def main():
                 )
 
         # Step-based checkpoint save
-        if curr_step > 0 and curr_step % training_args.save_every == 0:
+        if (curr_step > 0
+            and curr_step % training_args.save_every == 0
+            and (micro_step + 1) % training_args.gradient_accumulation_steps == 0):
             global_cumulative = torch.tensor(float(cumulative_samples), device=device)
             dist.all_reduce(global_cumulative, op=dist.ReduceOp.SUM)
             epoch_int = int(global_cumulative.item() / total_dataset_samples) if total_dataset_samples else 0
