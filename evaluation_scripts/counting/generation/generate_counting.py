@@ -19,6 +19,8 @@ from blip3o.model.builder import load_pretrained_model
 from blip3o.utils import disable_torch_init
 import random
 import warnings
+from peft import PeftConfig
+from safetensors.torch import load_file
 
 # Add project root to path for pipeline_llava_gen import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -86,22 +88,29 @@ def main(opt):
         assert opt.base_model is not None, "--base_model is required for LoRA checkpoints"
         print(f"[Rank {rank}] LoRA checkpoint detected. Loading base model from {opt.base_model}")
         tokenizer, multi_model, context_len = load_pretrained_model(opt.base_model, device=device)
-        if lora_mode == "und":
+        if opt.lora_mode == "und":
             peft_model_id = model_name
             adapter_weight_path = os.path.join(peft_model_id, 'adapter_model.safetensors')
             peft_config = PeftConfig.from_pretrained(
               peft_model_id,
             )   
-            ckpt = load_file(und_weight_path)   
+            ckpt = load_file(adapter_weight_path)   
             new_ckpt = {}
             for k in ckpt.keys():
                 new_k = k.replace('base_model.model.model.language_model', 'model')
                 new_ckpt[new_k] = ckpt[k]
+            print("="*50)
+            print(f"Loading adapter weights from {adapter_weight_path}")
+            print("="*50)
+            
             multi_model.load_adapter(
                 peft_config=peft_config,
                 adapter_state_dict=new_ckpt,
             )
         else:
+            print("="*50)
+            print(f"Loading adapter weights from {adapter_weight_path}")
+            print("="*50)
             multi_model.load_adapter(model_name)
         # Restore latent_queries from gen_components.pt
         gen_ckpt = os.path.join(model_name, "gen_components.pt")
