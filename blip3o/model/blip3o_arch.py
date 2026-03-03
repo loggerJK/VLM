@@ -267,8 +267,11 @@ class blip3oMetaForCausalLM(ABC):
         pad_ids = 128256
         vision_tower = self.visual
         gen_vision_tower = self.get_gen_vision_tower()
+        
+        # Text만 존재하는 경우
         if (gen_images is None and und_images is None) or input_ids.shape[1] == 1:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, None
+            # return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, None
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None
         
 
 
@@ -332,8 +335,8 @@ class blip3oMetaForCausalLM(ABC):
 
 
         
-        image_idx = (input_ids == IMAGE_TOKEN_IDX)
-        und_image_idx = (input_ids == UND_IMAGE_TOKEN_IDX)
+        image_idx = (input_ids == IMAGE_TOKEN_IDX) # Gen 이미지 토큰 위치
+        und_image_idx = (input_ids == UND_IMAGE_TOKEN_IDX) # Und 이미지 토큰 위치
         # img_indicator = torch.clone(image_idx)
         output_indicator = labels != -100
         input_indicator = labels == -100
@@ -362,7 +365,7 @@ class blip3oMetaForCausalLM(ABC):
         if not und_images is None:
             text_embeds[und_img_idx] = und_image_embeds.to(text_embeds.device)[:und_img_idx.sum(), :]
 
-        labels[image_idx] = -100
+        labels[image_idx] = -100 # Gen 이미지 토큰은 CE loss 계산에서 제외 
 
 
         return None, position_ids, attention_mask, past_key_values, text_embeds, labels, target_image_embeds

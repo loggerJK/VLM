@@ -284,6 +284,11 @@ class LuminaNextDiT2DModel(ModelMixin, ConfigMixin):
     def _set_gradient_checkpointing(self, module, value=False):
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
+            
+    # def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
+    #     for module in self.modules():
+    #         if hasattr(module, "gradient_checkpointing"):
+    #             module.gradient_checkpointing = enable
 
     def forward(
         self,

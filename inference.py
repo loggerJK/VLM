@@ -1,15 +1,16 @@
-from diffusers import DiffusionPipeline, AutoencoderKL, UNet2DConditionModel
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+from diffusers import DiffusionPipeline, AutoencoderKL, UNet2DConditionModel, EulerDiscreteScheduler
 from diffusers.schedulers import DDIMScheduler
 import numpy as np
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, AutoModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, AutoModel, CLIPImageProcessor
 from accelerate import init_empty_weights, infer_auto_device_map, load_checkpoint_and_dispatch
 import torch
 import pdb
 import copy
 import sys
 import argparse
-import os
 import json
 from tqdm import tqdm
 import shortuuid
@@ -25,10 +26,13 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 import base64
 from io import BytesIO
 from qwen_vl_utils import process_vision_info
+from pipeline_llava_gen import EmuVisualGenerationPipeline
 
 import re, random
 
-model_path = sys.argv[1]
+# model_path = sys.argv[1]
+# model_path = "/home/cvlab22/.cache/huggingface/hub/models--BLIP3o--BLIP3o-Model-8B/snapshots/c2edfc20814d4624c8d73ca3de351ebc3fa86508"
+model_path = "/home/cvlab12/BLIP3o/BLIP3o-Model-8B"
 diffusion_path = model_path + "/diffusion-decoder"
 
 
@@ -47,15 +51,19 @@ tokenizer, multi_model, context_len = load_pretrained_model(model_path, None, mo
 
 
 
-pipe = DiffusionPipeline.from_pretrained(
-   diffusion_path,
-   custom_pipeline="pipeline_llava_gen",
-   torch_dtype=torch.bfloat16,
-   use_safetensors=True,
-   variant="bf16",
-   multimodal_encoder=multi_model,
-   tokenizer=tokenizer,
-   safety_checker=None
+scheduler = EulerDiscreteScheduler.from_pretrained(diffusion_path, subfolder="scheduler")
+unet = UNet2DConditionModel.from_pretrained(diffusion_path, subfolder="unet", torch_dtype=torch.bfloat16, variant="bf16")
+vae = AutoencoderKL.from_pretrained(diffusion_path, subfolder="vae", torch_dtype=torch.bfloat16, variant="bf16")
+feature_extractor = CLIPImageProcessor.from_pretrained(diffusion_path, subfolder="feature_extractor")
+
+pipe = EmuVisualGenerationPipeline(
+    tokenizer=tokenizer,
+    multimodal_encoder=multi_model,
+    scheduler=scheduler,
+    unet=unet,
+    vae=vae,
+    feature_extractor=feature_extractor,
+    safety_checker=None,
 )
 
 
@@ -138,7 +146,4 @@ grid_image.save(f"{prompt[:100]}.png")
 # gen_img = pipe(inputs, guidance_scale=3.0)
 # gen_images.append(gen_img.image)
 # grid_image = create_image_grid(gen_images, 1, 1)
-# grid_image.save(f"i2i.png")
-
-
-
+# gri

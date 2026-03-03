@@ -42,9 +42,9 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
 
     def __init__(self, config):
         Qwen2_5_VLForConditionalGeneration.__init__(self, config)
-        config.model_type = "blip3o_qwen"
+        config.model_type = "blip3o_qwen"   
 
-        self.model = blip3oQwenModel(config)
+        self.model = blip3oQwenModel(config) # 사실상 Qwen2_5_VLModel
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
@@ -61,6 +61,7 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        # --- blip3o training params ---
         ids: Optional[list] = None,
         i_s_pos: Optional[list] = None,
         use_cache: Optional[bool] = None,
@@ -71,9 +72,43 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
         grid_thw: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None
+        cache_position: Optional[torch.LongTensor] = None,
+        # --- Qwen2.5-VL params (for generate loop) ---
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        rope_deltas: Optional[torch.LongTensor] = None,
+        second_per_grid_ts: Optional[torch.Tensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        # Qwen2.5-VL processor path: pixel_values present → delegate to parent forward
+        if pixel_values is not None or pixel_values_videos is not None:
+            return Qwen2_5_VLForConditionalGeneration.forward(
+                self,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                rope_deltas=rope_deltas,
+                cache_position=cache_position,
+                second_per_grid_ts=second_per_grid_ts,
+                logits_to_keep=logits_to_keep,
+                return_dict=return_dict,
+                **kwargs,
+            )
 
+        # --- blip3o training forward ---
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -88,7 +123,7 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
                 past_key_values,
                 inputs_embeds,
                 labels,
-                latents
+                latents # 디퓨전 타겟 이미지 임베딩, EVA-CLIP으로 인코딩 latent
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -114,7 +149,7 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
             return_dict=return_dict,
         )
         
-        hidden_states = outputs[0]
+        hidden_states = outputs[0] # (B, seq_len, hidden_size) 
         logits = self.lm_head(hidden_states)
         logits = logits.float()
         
@@ -162,7 +197,7 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
                 )
                 target = noise - latents
                 img_loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
-            print(f"img loss {img_loss}")
+            # print(f"img loss {img_loss}")
             total_loss = img_loss
 
         return CausalLMOutputWithPast(
@@ -182,6 +217,14 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
         image_sizes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
+        # Qwen2.5-VL processor outputs (pixel_values, image_grid_thw) →
+        # delegate to parent's generate() which handles them natively
+        if "pixel_values" in kwargs or "image_grid_thw" in kwargs:
+            if inputs is not None:
+                kwargs["input_ids"] = inputs
+            return Qwen2_5_VLForConditionalGeneration.generate(self, **kwargs)
+
+        # Legacy BLIP3o path (inputs, images, image_sizes)
         position_ids = kwargs.pop("position_ids", None)
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
@@ -404,11 +447,23 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
 
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
-                                      inputs_embeds=None, **kwargs):
+                                      inputs_embeds=None,
+                                      pixel_values=None,
+                                      pixel_values_videos=None,
+                                      image_grid_thw=None,
+                                      video_grid_thw=None,
+                                      second_per_grid_ts=None,
+                                      **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(
-            input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
+            input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            **kwargs
         )
         if images is not None:
             inputs['images'] = images

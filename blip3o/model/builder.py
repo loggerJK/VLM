@@ -34,7 +34,7 @@ def load_pretrained_model(model_path, load_8bit=False, load_4bit=False, device_m
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
 
-    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, torch_dtype=torch.float16).to('cuda:0')
+    model = blip3oQwenForInferenceLM.from_pretrained(model_path, low_cpu_mem_usage=True, torch_dtype=torch.float16).to(device)
 
     image_processor = None
     mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)

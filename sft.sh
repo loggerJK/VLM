@@ -7,6 +7,18 @@ export HF_HOME=/HF/Home/
 export OUTPUT_FOLDER=/Your/Model/Output/
 export IMG_FOLDER=/Your/SFT/Image/Folder
 
+# New optional arguments:
+#   --use_lora                        Enable LoRA (default: False)
+#   --lora_r 128                      LoRA rank
+#   --lora_alpha 32                   LoRA alpha
+#   --lora_target_modules "q_proj,k_proj,v_proj,o_proj"
+#   --optim adamw_bnb_8bit            8-bit AdamW optimizer
+#   --task counting|ocr_synthetic     Task type (uses --data_type mix by default)
+#   --mode gen|und|both               Training mode
+#   --validation_interval 500         Steps between validations
+#   --log_freq 250                    Steps between generation logging
+#   --auto_resume                     Auto-resume from latest checkpoint
+#   --resume_from_checkpoint PATH     Resume from specific checkpoint
 
 
 torchrun --nproc_per_node=8 \
