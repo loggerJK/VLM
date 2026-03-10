@@ -3,6 +3,7 @@
 Batch Text-to-image inference script from prompt file
 """
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 import json
 import argparse
 import time

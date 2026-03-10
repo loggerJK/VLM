@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--warmup_ratio", type=float, default=0.3, help="Warmup ratio for caching, in [0,1); the lower the faster")
     parser.add_argument("--refresh_interval", type=int, default=5, help="Refresh all cache every `refresh_interval` steps, in (1, timesteps-int(warmup_ratio*timesteps)-1]; the higher the faster")
     parser.add_argument("--num_samples", type=int, default=4, help="Number of samples per prompt")
+    parser.add_argument("--reverse", action='store_true', help="Reverse the order of the generated images")
     
     # LoRA Arguments
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="LoRA checkpoint path")
@@ -97,7 +98,10 @@ def main():
         if rank == 0:
             print(f"[INFO] Loading LoRA from {args.lora_ckpt_path}")
         model.load_adapter(args.lora_ckpt_path)
-    
+        model = model.to(device)
+
+    model.eval()
+
     # Wait for all processes to load model
     if world_size > 1:
         dist.barrier()
@@ -171,6 +175,9 @@ def main():
 
     # Split prompts among ranks
     my_prompts = prompt_data_list[rank::world_size]
+    if args.reverse:
+        my_prompts = my_prompts[::-1]
+        print("[INFO] ========REVERSED the order of prompts========")
     
     if rank == 0:
         print(f"Total prompts to process (across all ranks): {len(prompt_data_list)}")
@@ -226,6 +233,7 @@ def main():
                 current_seed = random.randint(1, 2**32 - 1)
             
             setup_seed(current_seed)
+            print(f"Rank {rank} - Sample [{sample_idx+1}/{args.num_samples}] Seed: {current_seed}")
             if rank == 0:
                 # print(f"  > Sample [{sample_idx+1}/{args.num_samples}] Seed: {current_seed}")
                 pass

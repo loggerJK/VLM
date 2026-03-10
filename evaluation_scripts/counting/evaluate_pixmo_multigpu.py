@@ -166,7 +166,8 @@ def main():
     if args.lora_ckpt_path:
         print(f"[Rank {rank}] Loading LoRA weights from {args.lora_ckpt_path}...")
         model.load_adapter(args.lora_ckpt_path)
-    
+    model.eval()
+
     vqvae = VQModel.from_pretrained(args.vae_ckpt, subfolder="vqvae").to(device)
     
     # Special Tokens

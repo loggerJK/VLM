@@ -79,8 +79,9 @@ def main():
     if args.lora_ckpt_path:
         print(f"[INFO] Loading LoRA from {args.lora_ckpt_path}")
         model.load_adapter(args.lora_ckpt_path)
-        
-    
+
+    model.eval()
+
     # Initial image parameters
     if args.painting_mode:
         img = Image.open(args.painting_image)
@@ -188,7 +189,7 @@ def main():
             print(f"  > Sample [{sample_idx+1}/{args.num_samples}] Seed: {current_seed}")
             
             # Create a generator for reproducibility
-            generator = torch.Generator(device='cpu')
+            generator = torch.Generator(device='cuda')
             generator.manual_seed(current_seed)
 
             # Generate VQ tokens

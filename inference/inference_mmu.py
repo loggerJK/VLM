@@ -103,6 +103,8 @@ def main():
     # img_token = add_break_line(input_img_token, token_grid_height, token_grid_width, new_number = NEW_LINE)
     # input_img_token = img_token
     
+    ##### 수정된 코드 #####
+    
     input_img_token, (H, W) = encode_img_with_breaks_fixed(image, vqvae)
     img_token = add_break_line(input_img_token[1:-1], H, W,new_number=NEW_LINE)
     img_token = [BOI] + img_token + [EOI]  # add BOI, EOI

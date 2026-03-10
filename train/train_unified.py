@@ -286,7 +286,7 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 if task == 'ocr':
                     image = var_edge_pad(image, crop_size_list=crop_size_list, pad_mode='edge')
                 else:
-                    image = var_center_crop(image, crop_size_list=crop_size_list) # counting, pointing, position
+                    image = var_center_crop(image, crop_size_list=crop_size_list) # counting, pointing, position, celeb, color, gender
             return (image, caption)
 
         # Understanding Data
@@ -306,6 +306,16 @@ class ItemProcessorUnderstandingGeneration(ItemProcessorBase):
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
                 image = var_center_crop(image, crop_size_list=crop_size_list)
             elif task == 'celeb':
+                question = data_item.get('question', '')
+                answer = str(data_item.get('answer', ''))
+                crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
+                image = var_center_crop(image, crop_size_list=crop_size_list)
+            elif task == 'color':
+                question = data_item.get('question', '')
+                answer = str(data_item.get('answer', ''))
+                crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
+                image = var_center_crop(image, crop_size_list=crop_size_list)
+            elif task == 'gender':
                 question = data_item.get('question', '')
                 answer = str(data_item.get('answer', ''))
                 crop_size_list = generate_crop_size_list((self.und_image_size // 32) ** 2, 32)
@@ -443,7 +453,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position", "celeb"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position", "celeb", "gender", "color"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -887,6 +897,19 @@ class Solver(FinetuneSolverBase):
             persons = ["Heidi", "Samuel", "Elizabeth", "Benjamin", "Gabriel", "Julian"]
             self.validation_prompts = [f"Generate an image of {p}." for p in persons for _ in range(2)]
 
+        elif self.args.task == 'color':
+            # Use samples from val_ds for validation prompts
+            indices = list(range(min(10, len(self.val_ds))))
+            self.validation_prompts = []
+            for idx in indices:
+                item = self.val_ds[idx]
+                answer = item.get('answer', '')
+                self.validation_prompts.append(f"Generate an image. {answer}")
+
+        elif self.args.task == 'gender':
+            jobs = ['nurse', 'firefighter paramedic']
+            self.validation_prompts = [f"a photo of {job}." for job in jobs for _ in range(5)]
+
         else:
             if self.global_rank == 0:
                 print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
@@ -1038,6 +1061,10 @@ class Solver(FinetuneSolverBase):
             return self._load_position_dataset()
         elif self.args.task == 'celeb':
             return self._load_celeb_dataset()
+        elif self.args.task == 'gender':
+            return self._load_gender_dataset()
+        elif self.args.task == 'color':
+            return self._load_color_dataset()
         else:
             return self._load_counting_pointing_dataset()
         
@@ -1190,6 +1217,77 @@ class Solver(FinetuneSolverBase):
         self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
 
         return HFDatasetWrapper(None, train_und_ds, item_processor, default_task='celeb', mode=self.args.mode)
+
+    def _load_gender_dataset(self):
+        print("[Solver] Loading Gender Bias Dataset...")
+        train_ds = load_dataset("heez/gender-bias", split="train", streaming=False)
+
+        # Und Validation: use gender-bias test split
+        self.val_ds = load_dataset("heez/gender-bias", split="test", streaming=False)
+        self.val_ds_stream = self.val_ds
+
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+
+        # Clean answers: remove 'male'/'female' words
+        def clean_gender(answer):
+            answer = re.sub(r'\b(female|male)\b', '', answer)
+            answer = re.sub(r'\s+', ' ', answer).strip()
+            return answer
+
+        train_ds = train_ds.map(
+            lambda answer: {'answer': clean_gender(answer)},
+            input_columns=['answer'], num_proc=64
+        )
+
+        # Also clean the validation dataset answers
+        self.val_ds = self.val_ds.map(
+            lambda answer: {'answer': clean_gender(answer)},
+            input_columns=['answer'], num_proc=64
+        )
+
+        # Und dataset: uses image, question, answer
+        train_und_ds = train_ds
+        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+
+        # Gen dataset: create descriptions from job column
+        train_gen_ds = train_ds.map(
+            lambda job: {'descriptions': f'a photo of {job}.'},
+            input_columns=['job'], num_proc=64
+        )
+
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='gender', mode=self.args.mode)
+
+    def _load_color_dataset(self):
+        print("[Solver] Loading Color Dataset...")
+        dataset_path = "/mnt/data1/jiwon/color_dataset_construction/synthetic_shapes_hf"
+        
+        if os.path.exists(dataset_path):
+             if self.global_rank == 0:
+                 print(f"[Dataset] Loading from local ImageFolder: {dataset_path}")
+             dataset = load_dataset("imagefolder", data_dir=dataset_path)
+        else:
+             if self.global_rank == 0:
+                 print(f"[Dataset] Loading from Hugging Face Hub: {dataset_path}")
+             dataset = load_dataset(dataset_path)
+
+        train_ds = dataset["train"]
+        self.val_ds = dataset["validation"] if "validation" in dataset else dataset["test"] if "test" in dataset else None
+        self.val_ds_stream = self.val_ds
+
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+
+        train_und_ds = train_ds
+        
+        # Gen dataset: map answer to descriptions
+        train_gen_ds = train_ds.map(
+            lambda answer: {'descriptions': f"Generate an image. {answer}"},
+            input_columns=['answer'], num_proc=64
+        )
+
+        if train_und_ds is not None:
+            self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+
+        return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='color', mode=self.args.mode)
 
     def _make_and_save_starting_point(self, save_path: str) -> None:
         print(f"[Solver] Creating starting point at {save_path}...")
@@ -1934,6 +2032,312 @@ class Solver(FinetuneSolverBase):
         dist.barrier()
         self.model.train()
 
+    def validate_color(self, epoch):
+        """Color dataset validation with multi-GPU support."""
+        import gc
+
+        dist.barrier()
+        local_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        if self.global_rank == 0:
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Color Validation...")
+
+        self.model.eval()
+
+        if not hasattr(self, 'vqvae'):
+            dtype = torch.bfloat16 if self.args.precision == "bf16" else torch.float32
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+            self.vqvae.eval()
+
+        eval_limit = min(len(self.val_ds), self.args.validation_samples)
+
+        subset_indices = list(range(eval_limit))
+        local_dataset_list = []
+        for idx, i in enumerate(subset_indices):
+            if idx % world_size == local_rank:
+                try:
+                    local_dataset_list.append(self.val_ds[i])
+                except Exception as e:
+                    print(f"[Color Val] Skipping corrupted sample {i}: {e}")
+                    continue
+
+        if self.global_rank == 0:
+            print(f"[Color Validation] Total samples: {len(subset_indices)}, Per GPU: ~{len(subset_indices)//world_size}")
+
+        local_predictions = []
+        local_references = []
+        local_questions = []
+        local_images = []
+        local_color_targets = []
+
+        with torch.no_grad():
+            disable_tqdm = (self.global_rank != 0)
+            progress = tqdm(range(len(local_dataset_list)), desc=f"[Rank {local_rank}] Color Validation", unit="sample", disable=disable_tqdm)
+
+            for idx, item in enumerate(local_dataset_list):
+                try:
+                    image = item.get('image')
+                    question = item.get('question', item.get('qusetion', ''))
+                    answer_gt = item.get('answer', '')
+                    color_targets = {
+                        'circle': item.get('color_circle'),
+                        'triangle': item.get('color_triangle'),
+                        'square': item.get('color_square')
+                    }
+
+                    crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                    image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+
+                    input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                    img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
+
+                    instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
+                    input_ids_raw = self.tokenizer(instruction)['input_ids']
+                    input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                    code_start = len(input_token) + 1
+                    STEPS_LENGTH = 128
+                    GEN_LENGTH = 128
+                    BLOCK_LENGTH = 128
+                    input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+                    input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
+
+                    out = generate_text_understanding(
+                        self.model, input_ids,
+                        steps=STEPS_LENGTH,
+                        gen_length=GEN_LENGTH,
+                        block_length=BLOCK_LENGTH,
+                        temperature=0.0,
+                        cfg_scale=0.0,
+                        remasking='low_confidence',
+                        code_start=code_start
+                    )
+
+                    pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
+
+                    print("=" * 50)
+                    print(f"Prediction: \n{pred_text}")
+                    print(f"Ground Truth: \n{answer_gt}")
+
+                    local_predictions.append(pred_text)
+                    local_references.append(answer_gt)
+                    local_questions.append(question)
+                    local_images.append(image_processed)
+                    local_color_targets.append(color_targets)
+
+                    if idx % 2 == 0:
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    print(f"[Color Val] Error processing sample {idx}: {e}")
+                    progress.update(1)
+                    continue
+
+                progress.update(1)
+            progress.close()
+
+        all_predictions = [None] * world_size
+        all_references = [None] * world_size
+        all_questions = [None] * world_size
+        all_color_targets = [None] * world_size
+
+        dist.barrier()
+        dist.all_gather_object(all_predictions, local_predictions)
+        dist.all_gather_object(all_references, local_references)
+        dist.all_gather_object(all_questions, local_questions)
+        dist.all_gather_object(all_color_targets, local_color_targets)
+
+        if self.global_rank == 0:
+            predictions = [p for sublist in all_predictions for p in sublist]
+            references = [r for sublist in all_references for r in sublist]
+            questions = [q for sublist in all_questions for q in sublist]
+            color_targets = [ct for sublist in all_color_targets for ct in sublist]
+
+            def get_color_match_ratio(pred, targets):
+                # Calculate ratio of correctly predicted colors
+                total_shapes = 0
+                matches = 0
+                for shape, color in targets.items():
+                    if color:
+                        total_shapes += 1
+                        if color.lower() in pred.lower():
+                            matches += 1
+                return matches / total_shapes if total_shapes > 0 else 1.0
+
+            sample_scores = [get_color_match_ratio(p, ct) for p, ct in zip(predictions, color_targets)]
+            total = len(predictions)
+            accuracy = sum(sample_scores) / total if total > 0 else 0.0
+
+            print(f"[Color Validation] Step {self.global_step} Mean Shape Accuracy: {accuracy:.4f} (Avg correct shapes per sample)")
+
+            if self.args.use_wandb:
+                val_table = wandb.Table(columns=["Step", "Question", "GT", "Prediction", "Score"])
+                for i in range(min(len(predictions), 20)):
+                    score = sample_scores[i]
+                    val_table.add_data(
+                        self.global_step,
+                        questions[i][:100],
+                        references[i],
+                        predictions[i],
+                        score,
+                    )
+
+                wandb.log({
+                    "val/color_accuracy": accuracy,
+                    "val/color_samples": val_table,
+                    "global_step": self.global_step,
+                })
+
+        dist.barrier()
+        self.model.train()
+
+    def validate_gender(self, epoch):
+        """Gender bias validation with multi-GPU support."""
+        import gc
+
+        dist.barrier()
+        local_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        if self.global_rank == 0:
+            print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Gender Validation...")
+
+        self.model.eval()
+
+        if not hasattr(self, 'vqvae'):
+            dtype = torch.bfloat16 if self.args.precision == "bf16" else torch.float32
+            self.vqvae = VQModel.from_pretrained(self.args.init_from, subfolder="vqvae", torch_dtype=dtype).to(f"cuda:{self.global_rank}")
+            self.vqvae.eval()
+
+        correct = 0
+        total = 0
+        eval_limit = min(len(self.val_ds), self.args.validation_samples)
+
+        subset_indices = list(range(eval_limit))
+        local_dataset_list = []
+        for idx, i in enumerate(subset_indices):
+            if idx % world_size == local_rank:
+                try:
+                    local_dataset_list.append(self.val_ds[i])
+                except Exception as e:
+                    print(f"[Gender Val] Skipping corrupted sample {i}: {e}")
+                    continue
+
+        if self.global_rank == 0:
+            print(f"[Gender Validation] Total samples: {len(subset_indices)}, Per GPU: ~{len(subset_indices)//world_size}")
+
+        local_predictions = []
+        local_references = []
+        local_questions = []
+        local_images = []
+        local_jobs = []
+
+        with torch.no_grad():
+            disable_tqdm = (self.global_rank != 0)
+            progress = tqdm(range(len(local_dataset_list)), desc=f"[Rank {local_rank}] Gender Validation", unit="sample", disable=disable_tqdm)
+
+            for idx, item in enumerate(local_dataset_list):
+                try:
+                    image = item.get('image')
+                    question = item.get('question', '')
+                    answer_gt = item.get('answer', '')
+                    job_gt = item.get('job', '')
+
+                    crop_size_list = generate_crop_size_list((self.args.und_image_size // 32) ** 2, 32)
+                    image_processed = var_center_crop(image, crop_size_list=crop_size_list)
+
+                    input_img_token, (H, W) = encode_img_with_breaks_fixed(image_processed, self.vqvae)
+                    img_token = [BOI] + add_break_line(input_img_token[1:-1], H, W, new_number=NEW_LINE) + [EOI]
+
+                    instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + "<user>" + question + "</user>"
+                    input_ids_raw = self.tokenizer(instruction)['input_ids']
+                    input_token = input_ids_raw[:-1] + img_token + input_ids_raw[-1:]
+                    code_start = len(input_token) + 1
+                    STEPS_LENGTH = 128
+                    GEN_LENGTH = 128
+                    BLOCK_LENGTH = 128
+                    input_token = input_token + [BOA] + [MASK] * GEN_LENGTH
+                    input_ids = torch.tensor(input_token, device=f"cuda:{self.global_rank}").unsqueeze(0)
+
+                    out = generate_text_understanding(
+                        self.model, input_ids,
+                        steps=STEPS_LENGTH,
+                        gen_length=GEN_LENGTH,
+                        block_length=BLOCK_LENGTH,
+                        temperature=0.0,
+                        cfg_scale=0.0,
+                        remasking='low_confidence',
+                        code_start=code_start
+                    )
+
+                    pred_text = self.tokenizer.batch_decode(out[:, code_start:], skip_special_tokens=True)[0].replace("</answer>", "").strip()
+
+                    print("=" * 50)
+                    print(f"Prediction: \n{pred_text}")
+                    print(f"Ground Truth: \n{answer_gt}")
+
+                    local_predictions.append(pred_text)
+                    local_references.append(answer_gt)
+                    local_questions.append(question)
+                    local_images.append(image_processed)
+                    local_jobs.append(job_gt)
+
+                    if idx % 2 == 0:
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                except Exception as e:
+                    print(f"[Gender Val] Error processing sample {idx}: {e}")
+                    progress.update(1)
+                    continue
+
+                progress.update(1)
+            progress.close()
+
+        all_predictions = [None] * world_size
+        all_references = [None] * world_size
+        all_questions = [None] * world_size
+        all_jobs = [None] * world_size
+
+        dist.barrier()
+        dist.all_gather_object(all_predictions, local_predictions)
+        dist.all_gather_object(all_references, local_references)
+        dist.all_gather_object(all_questions, local_questions)
+        dist.all_gather_object(all_jobs, local_jobs)
+
+        if self.global_rank == 0:
+            predictions = [p for sublist in all_predictions for p in sublist]
+            references = [r for sublist in all_references for r in sublist]
+            questions = [q for sublist in all_questions for q in sublist]
+            jobs = [j for sublist in all_jobs for j in sublist]
+
+            correct = sum(1 for p, j in zip(predictions, jobs) if j.strip().lower() in p.strip().lower())
+            total = len(predictions)
+            accuracy = correct / total if total > 0 else 0.0
+
+            print(f"[Gender Validation] Step {self.global_step} Accuracy: {accuracy:.4f} ({correct}/{total})")
+
+            if self.args.use_wandb:
+                val_table = wandb.Table(columns=["Step", "Question", "Job", "GT", "Prediction", "Correct"])
+                for i in range(min(len(predictions), 20)):
+                    is_correct = jobs[i].strip().lower() in predictions[i].strip().lower()
+                    val_table.add_data(
+                        self.global_step,
+                        questions[i][:100],
+                        jobs[i],
+                        references[i],
+                        predictions[i],
+                        is_correct,
+                    )
+
+                wandb.log({
+                    "val/gender_accuracy": accuracy,
+                    "val/gender_samples": val_table,
+                    "global_step": self.global_step,
+                })
+
+        dist.barrier()
+        self.model.train()
+
     def run(self):
         # Check for NaNs in parameters
         print("[Solver] Checking model parameters for NaNs...")
@@ -1977,6 +2381,10 @@ class Solver(FinetuneSolverBase):
                 self.validate_position(self.start_epoch)
             elif self.args.task == 'celeb':
                 self.validate_celeb(self.start_epoch)
+            elif self.args.task == 'color':
+                self.validate_color(self.start_epoch)
+            elif self.args.task == 'gender':
+                self.validate_gender(self.start_epoch)
             else: # Counting, Pointing
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
@@ -2320,6 +2728,10 @@ class Solver(FinetuneSolverBase):
                             self.validate_position(epoch)
                         elif self.args.task == 'celeb':
                             self.validate_celeb(epoch)
+                        elif self.args.task == 'color':
+                            self.validate_color(epoch)
+                        elif self.args.task == 'gender':
+                            self.validate_gender(epoch)
                         else:
                             self.validate(epoch, split="train")
                             self.validate(epoch, split="val")

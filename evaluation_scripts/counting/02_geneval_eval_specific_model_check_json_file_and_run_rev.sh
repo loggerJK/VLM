@@ -35,7 +35,7 @@ for ((i=${#parents[@]}-1; i>=0; i--)); do
     echo "Evaluating Model Result: $parent"
     echo "--------------------------------------------------------"
 
-    CUDA_VISIBLE_DEVICES=4 PYTHONPATH="$BASE_DIR" conda run -n geneval python -u "$BASE_DIR/evaluation/evaluate_images_counting.py" \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$BASE_DIR" conda run -n geneval python -u "$BASE_DIR/evaluation/evaluate_images_counting.py" \
         "$parent" \
         --outfile "$parent/evaluation_results.jsonl" \
         --model-path "$BASE_DIR/ckpt"

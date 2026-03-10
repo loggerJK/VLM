@@ -1,38 +1,40 @@
 # export CUDA_VISIBLE_DEVICES=7
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export MASTER_ADDR=localhost
-export MASTER_PORT=25001
-export CUDA_VISIBLE_DEVICES=4,5,6,7 # Set this according to your available
+export MASTER_PORT=29504
+export CUDA_VISIBLE_DEVICES=4,5 # Set this according to your available
 ngpus=$(echo ${CUDA_VISIBLE_DEVICES} | awk -F',' '{print NF}')
 # base_dir="/mnt/cvlab22_data1"
 base_dir="/mnt/data1"
+NUM_SAMPLES=20
+OUT_DIR="generation_eval_more_samples"
 
 # ---------------------------------------------------------------------------- #
 #                        내부 체크포인트들 / Understanding Only                        #
 # ---------------------------------------------------------------------------- #
 
 
-# checkpoint_path="jiwon/Lumina-DiMOO/output"
-# ckpt_list=(
-#     "lora128_counting_wohead/epoch4"
-#     "lora128_counting_wohead_resumeEpoch12_lr3e-6/epoch14"
-# )
+checkpoint_path="jiwon/Lumina-DiMOO/output"
+ckpt_list=(
+    "lora128_counting_wohead/epoch12"
+)
 
-# for ckpt in "${ckpt_list[@]}"; do
-#     echo "Running inference for checkpoint: $ckpt"
-#     echo "Output directory name: $ckpt"
-#     torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
-#         --checkpoint Alpha-VLLM/Lumina-DiMOO \
-#         --height 1024 \
-#         --width 1024 \
-#         --timesteps 64 \
-#         --cfg_scale 4.0 \
-#         --seed 65513 \
-#         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-#         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-#         --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
-#         --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
-# done
+for ckpt in "${ckpt_list[@]}"; do
+    echo "Running inference for checkpoint: $ckpt"
+    echo "Output directory name: $ckpt"
+    torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
+        --checkpoint Alpha-VLLM/Lumina-DiMOO \
+        --height 1024 \
+        --width 1024 \
+        --timesteps 64 \
+        --cfg_scale 4.0 \
+        --seed 65513 \
+        --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
+        --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
+        --output_dir ${base_dir}/dvlm/lumina/counting/${OUT_DIR}/lumina_${ckpt} \
+        --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl \
+        --num_samples ${NUM_SAMPLES}
+done
 
 
 # ---------------------------------------------------------------------------- #
@@ -40,7 +42,7 @@ base_dir="/mnt/data1"
 # ---------------------------------------------------------------------------- #
 
 # /mnt/data1/dvlm/checkpoints
-checkpoint_path="dvlm/checkpoints"
+checkpoint_path="dvlm/lumina/checkpoints"
 ckpt_list=(
     #### Generation 
     # "lumina_train_generation_wohead_1024/epoch0"
@@ -54,7 +56,7 @@ ckpt_list=(
     # "lumina_train_generation_wohead_1024/epoch8"
     # "lumina_train_generation_wohead_1024/epoch9"
     # "lumina_train_generation_wohead_1024/epoch10"
-    # "lumina_train_generation_wohead_1024/epoch11"
+    "lumina_train_generation_wohead_1024/epoch11"
     # "lumina_train_generation_wohead_1024/epoch12"
 
     #### Generation + Understanding
@@ -100,7 +102,7 @@ ckpt_list=(
 for ckpt in "${ckpt_list[@]}"; do # 순방향 인퍼런스
     echo "Running inference for checkpoint: $ckpt"
     echo "Output directory name: $ckpt"
-    torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
+    torchrun --nproc_per_node ${ngpus} --rdzv_endpoint 127.0.0.1:$MASTER_PORT inference/inference_t2i_multigpu.py\
         --checkpoint Alpha-VLLM/Lumina-DiMOO \
         --height 1024 \
         --width 1024 \
@@ -109,8 +111,9 @@ for ckpt in "${ckpt_list[@]}"; do # 순방향 인퍼런스
         --seed 65513 \
         --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
         --lora_ckpt_path ${base_dir}/${checkpoint_path}/${ckpt} \
-        --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${ckpt} \
-        --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
+        --output_dir ${base_dir}/dvlm/lumina/counting/${OUT_DIR}/lumina_${ckpt} \
+        --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl \
+        --num_samples ${NUM_SAMPLES}
 done
 
 
@@ -121,7 +124,7 @@ done
 output_dir_name="BASELINE"
 # echo "Running inference for checkpoint: $ckpt"
 echo "Output directory name: $output_dir_name"
-torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
+torchrun --nproc_per_node ${ngpus} --rdzv_endpoint 127.0.0.1:$MASTER_PORT inference/inference_t2i_multigpu.py\
     --checkpoint Alpha-VLLM/Lumina-DiMOO \
     --height 1024 \
     --width 1024 \
@@ -129,5 +132,6 @@ torchrun --nproc_per_node ${ngpus} inference/inference_t2i_multigpu.py\
     --cfg_scale 4.0 \
     --seed 65513 \
     --vae_ckpt Alpha-VLLM/Lumina-DiMOO \
-    --output_dir ${base_dir}/dvlm/lumina/counting/generation_eval/lumina_${output_dir_name} \
-    --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl
+    --output_dir ${base_dir}/dvlm/lumina/counting/${OUT_DIR}/lumina_${output_dir_name} \
+    --prompt_files ${base_dir}/jiwon/geneval/prompts/evaluation_metadata_count.jsonl \
+    --num_samples ${NUM_SAMPLES}

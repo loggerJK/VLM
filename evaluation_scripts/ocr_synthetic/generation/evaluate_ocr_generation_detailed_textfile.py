@@ -211,6 +211,7 @@ def main():
                         help="GLM-OCR model path")
     parser.add_argument("--ocr_device", type=str, default=None,
                         help="Device for GLM-OCR (e.g. 'cuda:1'). Defaults to same as generation model.")
+    parser.add_argument("--shuffle", action="store_true", help="Whether to shuffle prompts before processing")
     args = parser.parse_args()
     
     results_json_path = os.path.join(args.output_dir, "results.json")
@@ -257,6 +258,9 @@ def main():
     if args.num_samples > 0:
         total_samples = min(args.num_samples, total_samples)
         prompts = prompts[:total_samples]
+    if args.shuffle:
+        random.seed(args.seed)  # Ensure reproducibility
+        random.shuffle(prompts)
 
     print(f"[Rank {rank}] Loaded {total_samples} prompts from {args.prompt_file}")
 

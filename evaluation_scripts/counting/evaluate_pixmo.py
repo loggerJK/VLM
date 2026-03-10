@@ -116,14 +116,15 @@ def main():
     if args.lora_ckpt_path:
         print(f"Loading LoRA weights from {args.lora_ckpt_path}...")
         model.load_adapter(args.lora_ckpt_path)
+    model.eval()
     vqvae = VQModel.from_pretrained(args.vae_ckpt, subfolder="vqvae").to(device)
-    
+
     # Special Tokens
     MASK = SPECIAL_TOKENS["mask_token"]
     NEW_LINE = SPECIAL_TOKENS["newline_token"]
     BOA = SPECIAL_TOKENS["answer_start"]
     EOA = SPECIAL_TOKENS["answer_end"]
-    
+
     # Eval loop
     true_labels = []
     pred_labels = []

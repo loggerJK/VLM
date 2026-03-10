@@ -1,6 +1,6 @@
 #!/bin/bash
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,1,2,3,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 NGPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
 
@@ -39,7 +39,7 @@ echo "========================================"
 echo "Running baseline OCR generation evaluation for ${prompt_type} dataset"
 echo "========================================"
 
-run_eval "${OUTPUT_BASE}/baseline"
+# run_eval "${OUTPUT_BASE}/baseline"
 
 # ---------------------------------------------------------------------------- #
 #                               OCR_Understanding                              #
@@ -79,13 +79,27 @@ done
 
 checkpoint_path="dvlm/lumina/checkpoints"
 ckpt_list=(
-    "lora128_ocr_synthetic_wohead/epoch0"
-    "lora128_ocr_synthetic_wohead/epoch1"
-    "lora128_ocr_synthetic_wohead/epoch2"
-    "lora128_ocr_synthetic_wohead/epoch3"
-    "lora128_ocr_synthetic_wohead/epoch4"
-    "lora128_ocr_synthetic_wohead/epoch5"
-    "lora128_ocr_synthetic_wohead/epoch6"
+    # "lora128_ocr_synthetic_wohead/epoch0"
+    # "lora128_ocr_synthetic_wohead/epoch1"
+    # "lora128_ocr_synthetic_wohead/epoch2"
+    # "lora128_ocr_synthetic_wohead/epoch3"
+    # "lora128_ocr_synthetic_wohead/epoch4"
+    # "lora128_ocr_synthetic_wohead/epoch5"
+    # "lora128_ocr_synthetic_wohead/epoch6"
+)
+
+for ckpt in "${ckpt_list[@]}"; do
+    echo "========================================"
+    echo "Running OCR generation evaluation for checkpoint: $ckpt on ${prompt_type} dataset"
+    echo "========================================"
+
+    run_eval "${OUTPUT_BASE}/${ckpt}" --lora_ckpt_path "${base_dir}/${checkpoint_path}/${ckpt}"
+done
+
+checkpoint_path="jiwon/Lumina-DiMOO/output"
+
+ckpt_list=(
+    lora128_ocr_synthetic_wohead_gen_#2/epoch0-iter16799-step525
 )
 
 for ckpt in "${ckpt_list[@]}"; do
