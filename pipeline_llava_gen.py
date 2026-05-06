@@ -14,7 +14,7 @@
 # ===========================================================================================
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from PIL import Image
 import numpy as np
@@ -25,6 +25,7 @@ import pdb
 
 from diffusers import DiffusionPipeline
 from diffusers.utils import BaseOutput
+from diffusers.utils.torch_utils import randn_tensor
 
 from diffusers import UNet2DConditionModel, EulerDiscreteScheduler, AutoencoderKL
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
@@ -98,6 +99,8 @@ class EmuVisualGenerationPipeline(DiffusionPipeline):
         guidance_scale: float = 3.0,
         crop_info: List[int] = [0, 0],
         original_size: List[int] = [1024, 1024],
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        disable_tqdm: bool = False,
     ):
         if not isinstance(inputs, list):
             inputs = [inputs]
@@ -137,11 +140,16 @@ class EmuVisualGenerationPipeline(DiffusionPipeline):
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
-        latents = torch.randn(shape, device=device, dtype=dtype)
+        latents = randn_tensor(
+            shape,
+            generator=generator,
+            device=device,
+            dtype=dtype,
+        )
         latents = latents * self.scheduler.init_noise_sigma
 
         # 4. Denoising loop
-        for t in tqdm(timesteps):
+        for t in tqdm(timesteps, disable=disable_tqdm, dynamic_ncols=True):
             # Expand the latents if doing classifier free guidance: 2B x 4 x H x W
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
