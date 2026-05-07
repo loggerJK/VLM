@@ -173,6 +173,7 @@ class VLChatProcessor(ProcessorMixin):
         for message in conversations:
             conv.append_message(message["role"], message["content"].strip())
         sft_prompt = conv.get_prompt().strip()
+        print(f"sft_prompt: {sft_prompt}")
 
         return sft_prompt
 

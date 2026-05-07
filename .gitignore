@@ -1,3 +1,8 @@
+checkpoints/ 
+results/
+eval_results/
+results_geneval_count_extended/
+
 ##### Python.gitignore #####
 # Byte-compiled / optimized / DLL files
 **/__pycache__/

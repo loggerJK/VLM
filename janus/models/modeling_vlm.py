@@ -189,6 +189,10 @@ class MultiModalityPreTrainedModel(PreTrainedModel):
 
 class MultiModalityCausalLM(MultiModalityPreTrainedModel):
     def __init__(self, config: MultiModalityConfig):
+        _tied_weights_keys = {}
+        all_tied_weights_keys = _tied_weights_keys
+        self._tied_weights_keys = _tied_weights_keys
+        self.all_tied_weights_keys = all_tied_weights_keys
         super().__init__(config)
 
         vision_config = config.vision_config
