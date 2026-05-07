@@ -1,0 +1,16 @@
+{
+  "tag": "counting",
+  "include": [
+    {
+      "class": "person",
+      "count": 5
+    }
+  ],
+  "exclude": [
+    {
+      "class": "person",
+      "count": 6
+    }
+  ],
+  "prompt": "a photo of five persons"
+}
