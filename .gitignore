@@ -6,3 +6,5 @@ evaluation_results/
 # *.sh
 .env
 ablation/
+output/
+output2

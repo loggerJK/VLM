@@ -32,6 +32,7 @@ def generate_image(
     refresh_interval=5,
     warmup_ratio=0.3,
     disable_tqdm=False,
+    attention_capture=None,
 ) -> torch.LongTensor:
     """
     MaskGit parallel decoding to generate VQ tokens
@@ -109,10 +110,20 @@ def generate_image(
         if cfg_scale > 0:
             uncond = torch.cat((uncon_ids.to(x.device), x[:, code_start-2:]), axis=1)
             uncond_vq_mask = torch.cat((torch.zeros((1, uncon_ids.size()[1]), dtype=torch.bool).to(x.device), vq_mask[:, code_start-2:]), axis=1)
-            cond_logits = model(x, infer=True,
-                    cat='cond', use_cache=use_cache, 
-                    to_compute_mask = cond_to_compute_mask if not refresh_steps[step] else None,
-                ).logits[..., vocab_offset : vocab_offset + codebook_size]
+            should_capture = attention_capture is not None and step % 2 == 0
+            cond_compute_mask = None if should_capture else cond_to_compute_mask if not refresh_steps[step] else None
+            if should_capture and hasattr(m, "set_attention_capture"):
+                capture_config = dict(attention_capture)
+                capture_config["step"] = step
+                m.set_attention_capture(capture_config)
+            try:
+                cond_logits = model(x, infer=True,
+                        cat='cond', use_cache=use_cache, 
+                        to_compute_mask = cond_compute_mask,
+                    ).logits[..., vocab_offset : vocab_offset + codebook_size]
+            finally:
+                if should_capture and hasattr(m, "clear_attention_capture"):
+                    m.clear_attention_capture()
             cond_mask_logits = cond_logits[vq_mask].view(B, -1, codebook_size)
             uncond_logits = model(uncond, infer=True,
                     cat='uncond', use_cache=use_cache, 
@@ -121,7 +132,17 @@ def generate_image(
             uncond_mask_logits = uncond_logits[uncond_vq_mask].view(B, -1, codebook_size)
             logits = (1 + cfg_scale) * cond_mask_logits - cfg_scale * uncond_mask_logits
         else:
-            logits = model(x, infer=True).logits[:, vq_mask[0], vocab_offset : vocab_offset + codebook_size]
+            should_capture = attention_capture is not None and step % 2 == 0
+            cond_compute_mask = None if should_capture else None
+            if should_capture and hasattr(m, "set_attention_capture"):
+                capture_config = dict(attention_capture)
+                capture_config["step"] = step
+                m.set_attention_capture(capture_config)
+            try:
+                logits = model(x, infer=True, to_compute_mask=cond_compute_mask).logits[:, vq_mask[0], vocab_offset : vocab_offset + codebook_size]
+            finally:
+                if should_capture and hasattr(m, "clear_attention_capture"):
+                    m.clear_attention_capture()
 
         sampled = gumbel_max_sample(logits, temperature, generator=generator)
         sampled_full = sampled + vocab_offset

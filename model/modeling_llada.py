@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sys
 import random
 from abc import abstractmethod
@@ -589,6 +590,8 @@ class LLaDABlock(nn.Module):
                 pass
 
         self.use_cache = False
+        self.attention_capture = None
+        self.force_manual_attention = False
         self.init_cache()
 
     def init_cache(self):
@@ -679,6 +682,72 @@ class LLaDABlock(nn.Module):
                 is_causal=False,
             )
 
+    def _manual_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert k.size(1) == v.size(1)
+        num_kv_heads = k.size(1)
+        num_q_heads = q.size(1)
+        if num_q_heads != num_kv_heads:
+            assert num_q_heads % num_kv_heads == 0
+            k = k.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+            v = v.repeat_interleave(num_q_heads // num_kv_heads, dim=1, output_size=num_q_heads)
+
+        scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * (1.0 / math.sqrt(q.size(-1)))
+        attn_probs = torch.softmax(scores, dim=-1)
+        attn_output = torch.matmul(attn_probs.to(dtype=v.dtype), v)
+        return attn_output, attn_probs
+
+    def _save_attention_capture(self, attn_probs: torch.Tensor):
+        capture = self.attention_capture
+        if not capture:
+            return
+
+        text_indices = torch.tensor(capture["query_indices"], device=attn_probs.device, dtype=torch.long)
+        image_indices = torch.tensor(capture["image_key_indices"], device=attn_probs.device, dtype=torch.long)
+        direction = capture.get("direction", "t2i")
+
+        def save_selected(selected: torch.Tensor, direction_name: str, query_name: str, key_name: str):
+            save_path = os.path.join(
+                capture["output_dir"],
+                f"step_{int(capture['step']):03d}_layer_{self.layer_id:02d}_{direction_name}.pt",
+            )
+            torch.save(
+                {
+                    "attention_map": selected.to(dtype=torch.float32).cpu(),
+                    "step": int(capture["step"]),
+                    "layer": int(self.layer_id),
+                    "prompt_text": capture["prompt_text"],
+                    "sample_idx": int(capture["sample_idx"]),
+                    "direction": direction_name,
+                    "query_type": query_name,
+                    "key_type": key_name,
+                    "text_token_indices": list(capture["query_indices"]),
+                    "image_token_indices": list(capture["image_key_indices"]),
+                    "query_token_ids": list(capture["query_token_ids"]),
+                    "query_token_pieces": list(capture["query_token_pieces"]),
+                    "query_token_decoded": list(capture["query_token_decoded"]),
+                    "grid_size": list(capture["grid_size"]),
+                },
+                save_path,
+            )
+            print(
+                f"[ATTN SAVE] prompt={capture['prompt_text']!r} "
+                f"step={int(capture['step'])} layer={self.layer_id} direction={direction_name} "
+                f"shape={tuple(selected.shape)} path={save_path}",
+                flush=True,
+            )
+
+        if direction in ("t2i", "both"):
+            selected_t2i = attn_probs[0].index_select(1, text_indices).index_select(2, image_indices)
+            save_selected(selected_t2i, "t2i", "text", "image")
+        if direction in ("i2t", "both"):
+            selected_i2t = attn_probs[0].index_select(1, image_indices).index_select(2, text_indices)
+            save_selected(selected_i2t, "i2t", "image", "text")
+
     def attention(
         self,
         q: torch.Tensor,
@@ -729,14 +798,19 @@ class LLaDABlock(nn.Module):
 
         # Get the attention scores.
         # shape: (B, nh, T, hs)
-        att = self._scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=0.0 if not self.training else self.config.attention_dropout,
-            is_causal=False,
-        )
+        if self.attention_capture is not None or self.force_manual_attention:
+            att, attn_probs = self._manual_attention(q, k, v)
+            if self.attention_capture is not None:
+                self._save_attention_capture(attn_probs)
+        else:
+            att = self._scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=0.0 if not self.training else self.config.attention_dropout,
+                is_causal=False,
+            )
 
         # Re-assemble all head outputs side-by-side.
         att = att.transpose(1, 2).contiguous().view(B, T, C)
@@ -1430,6 +1504,18 @@ class LLaDAModel(nn.Module):
             block.init_cache()
         self.logit_cache = {}
 
+    def set_attention_capture(self, capture_config: Dict):
+        for block in self.transformer.blocks:
+            block.attention_capture = capture_config
+
+    def clear_attention_capture(self):
+        for block in self.transformer.blocks:
+            block.attention_capture = None
+
+    def set_manual_attention(self, enable: bool = True):
+        for block in self.transformer.blocks:
+            block.force_manual_attention = enable
+
 
 def create_model_config_from_pretrained_config(config: LLaDAConfig):
     """
@@ -1569,6 +1655,15 @@ class LLaDAModelLM(PreTrainedModel):
 
     def empty_cache(self):
         self.model.empty_cache()
+
+    def set_attention_capture(self, capture_config: Dict):
+        self.model.set_attention_capture(capture_config)
+
+    def clear_attention_capture(self):
+        self.model.clear_attention_capture()
+
+    def set_manual_attention(self, enable: bool = True):
+        self.model.set_manual_attention(enable)
 
 # Register the model so that it is available for transformer pipelines, auto-loading, etc.
 AutoModel.register(LLaDAConfig, LLaDAModelLM)
