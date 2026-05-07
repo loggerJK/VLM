@@ -21,6 +21,8 @@ def generate_text_understanding(
     remasking='low_confidence', 
     mask_id=126336, 
     code_start: Optional[int] = None,
+    attention_capture=None,
+    attention_capture_interval: int = 8,
 ):
     """
     Text understanding generation function
@@ -40,30 +42,59 @@ def generate_text_understanding(
     device = next(model.parameters()).device
 
     x = prompt
+    m = model.module if hasattr(model, "module") else model
 
     prompt_index = (x != mask_id)
 
     assert gen_length % block_length == 0
     num_blocks = gen_length // block_length
 
-    assert steps % num_blocks == 0
-    steps = steps // num_blocks
+    total_steps = steps
+    assert total_steps % num_blocks == 0
+    steps_per_block = total_steps // num_blocks
 
     for num_block in range(num_blocks):
         block_mask_index = (x[:, code_start + num_block * block_length: code_start + (num_block + 1) * block_length:] == mask_id)
-        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
+        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps_per_block)
         
-        for i in range(steps):
+        for i in range(steps_per_block):
+            global_step = num_block * steps_per_block + i
             mask_index = (x == mask_id)
             if cfg_scale > 0.:
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_, infer=True).logits
+                should_capture = (
+                    attention_capture is not None
+                    and attention_capture_interval > 0
+                    and global_step % attention_capture_interval == 0
+                )
+                if should_capture and hasattr(m, "set_attention_capture"):
+                    capture_config = dict(attention_capture)
+                    capture_config["step"] = global_step
+                    m.set_attention_capture(capture_config)
+                try:
+                    logits = model(x_, infer=True).logits
+                finally:
+                    if should_capture and hasattr(m, "clear_attention_capture"):
+                        m.clear_attention_capture()
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x, infer=True).logits
+                should_capture = (
+                    attention_capture is not None
+                    and attention_capture_interval > 0
+                    and global_step % attention_capture_interval == 0
+                )
+                if should_capture and hasattr(m, "set_attention_capture"):
+                    capture_config = dict(attention_capture)
+                    capture_config["step"] = global_step
+                    m.set_attention_capture(capture_config)
+                try:
+                    logits = model(x, infer=True).logits
+                finally:
+                    if should_capture and hasattr(m, "clear_attention_capture"):
+                        m.clear_attention_capture()
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l

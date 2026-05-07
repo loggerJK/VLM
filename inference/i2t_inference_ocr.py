@@ -134,6 +134,7 @@ def main():
     parser.add_argument("--dataset_path", type=str, default="Jiwon-Kang/Llama-Nemotron-VLM-Dataset-v1-OCR4")
     parser.add_argument("--save-attention-maps", dest="save_attention_maps", action="store_true", help="Save query=text, key=image attention maps for generated OCR answers")
     parser.add_argument("--no-save-attention-maps", dest="save_attention_maps", action="store_false", help="Disable attention-map saving")
+    parser.add_argument("--attention-save-step-interval", type=int, default=8, help="Save attention maps every N denoising steps")
     parser.add_argument("--manual-attention", dest="manual_attention", action="store_true", help="Force manual attention path")
     parser.add_argument("--no-manual-attention", dest="manual_attention", action="store_false", help="Disable forced manual attention path")
     parser.set_defaults(save_attention_maps=False, manual_attention=False)
@@ -239,11 +240,11 @@ def main():
         # Prepare generation input
         code_start = len(input_token) + 1
         input_token = input_token + [BOA] + [MASK] * args.gen_length
-        input_ids = torch.tensor(input_token, device=device).unsqueeze(0)
+        base_input_ids = torch.tensor(input_token, device=device).unsqueeze(0)
 
         # Generate
         out = generate_text_understanding(
-            model, input_ids,
+            model, base_input_ids.clone(),
             steps=args.steps,
             gen_length=args.gen_length,
             block_length=args.block_length,
@@ -298,12 +299,20 @@ def main():
                     "direction": "t2i",
                     "step": 0,
                 }
-                if hasattr(model, "set_attention_capture"):
-                    model.set_attention_capture(attention_capture)
-                    try:
-                        _ = model(out, infer=True)
-                    finally:
-                        model.clear_attention_capture()
+                set_all_seeds(args.seed)
+                _ = generate_text_understanding(
+                    model,
+                    base_input_ids.clone(),
+                    steps=args.steps,
+                    gen_length=args.gen_length,
+                    block_length=args.block_length,
+                    temperature=args.temperature,
+                    cfg_scale=0.0,
+                    remasking='low_confidence',
+                    code_start=code_start,
+                    attention_capture=attention_capture,
+                    attention_capture_interval=args.attention_save_step_interval,
+                )
 
         print(f"[Rank {rank}][{i+1}] ==============Prediction==============\n {pred_text}")
         print(f"[Rank {rank}][{i+1}] ==============Ground Truth==============\n {answer_gt}")
