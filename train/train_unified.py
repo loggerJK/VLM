@@ -1104,7 +1104,7 @@ class Solver(FinetuneSolverBase):
         ) # Answer -> Descriptions
 
         # Understanding validation dataset: train_und_ds에서 100개 샘플 선택
-        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+        self.train_und_ds_val = train_und_ds.select(range(min(self.args.validation_samples, len(train_und_ds))))
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
         
@@ -1176,7 +1176,7 @@ class Solver(FinetuneSolverBase):
             lambda _: {'task': 'counting'},
             input_columns=['descriptions'], num_proc=64
         )
-        self.train_und_ds_val = train_und_counting.select(range(min(100, len(train_und_counting))))
+        self.train_und_ds_val = train_und_counting.select(range(min(self.args.validation_samples, len(train_und_counting))))
 
         # --- OCR Rendered understanding ---
         ocr_ds = load_dataset("Jiwon-Kang/OCR-Synthetic-Rendered-200K", num_proc=64)
@@ -1187,7 +1187,7 @@ class Solver(FinetuneSolverBase):
 
         # OCR validation: 첫 100개 고정 (validate_ocr()가 self.val_ds를 사용)
         val_ocr = ocr_ds["validation"]
-        self.val_ds = val_ocr.select(range(min(100, len(val_ocr))))
+        self.val_ds = val_ocr.select(range(min(self.args.validation_samples, len(val_ocr))))
 
         # --- Concatenate & wrap ---
         combined_und_ds = concatenate_datasets([train_und_counting, train_und_ocr])
@@ -1220,7 +1220,7 @@ class Solver(FinetuneSolverBase):
             lambda _: {'task': 'counting'},
             input_columns=['descriptions'], num_proc=64
         )
-        self.train_und_ds_val = train_und_counting.select(range(min(100, len(train_und_counting))))
+        self.train_und_ds_val = train_und_counting.select(range(min(self.args.validation_samples, len(train_und_counting))))
 
         # --- Relative Position understanding ---
         train_und_rel = load_dataset("heez/relative-position-new", split="train", streaming=False, num_proc=64)
@@ -1290,7 +1290,7 @@ class Solver(FinetuneSolverBase):
         train_gen_ds = train_ds.filter(lambda descriptions: descriptions is not None and descriptions != '', num_proc=64, input_columns=['descriptions'])
         train_und_ds = train_ds.filter(lambda descriptions: descriptions is None or descriptions == '', num_proc=64, input_columns=['descriptions'])
 
-        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+        self.train_und_ds_val = train_und_ds.select(range(min(self.args.validation_samples, len(train_und_ds))))
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task=self.args.task, mode=self.args.mode)
 
@@ -1303,7 +1303,7 @@ class Solver(FinetuneSolverBase):
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
 
         train_und_ds = train_ds
-        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+        self.train_und_ds_val = train_und_ds.select(range(min(self.args.validation_samples, len(train_und_ds))))
 
         return HFDatasetWrapper(None, train_und_ds, item_processor, default_task='celeb', mode=self.args.mode)
 
@@ -1336,7 +1336,7 @@ class Solver(FinetuneSolverBase):
 
         # Und dataset: uses image, question, answer
         train_und_ds = train_ds
-        self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+        self.train_und_ds_val = train_und_ds.select(range(min(self.args.validation_samples, len(train_und_ds))))
 
         # Gen dataset: create descriptions from job column
         train_gen_ds = train_ds.map(
@@ -1374,7 +1374,7 @@ class Solver(FinetuneSolverBase):
         )
 
         if train_und_ds is not None:
-            self.train_und_ds_val = train_und_ds.select(range(min(100, len(train_und_ds))))
+            self.train_und_ds_val = train_und_ds.select(range(min(self.args.validation_samples, len(train_und_ds))))
 
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='color', mode=self.args.mode)
 
@@ -1429,7 +1429,7 @@ class Solver(FinetuneSolverBase):
 
         correct = 0
         total = 0
-        eval_limit = 100
+        eval_limit = self.args.validation_samples
         
         # Rank별로 local_dataset 리스트 준비
         eval_dataset = iter(self.val_ds_stream)
@@ -1579,7 +1579,7 @@ class Solver(FinetuneSolverBase):
 
         correct = 0
         total = 0
-        eval_limit = 100
+        eval_limit = self.args.validation_samples
         
         details_buffer = []
         gt_counts = []

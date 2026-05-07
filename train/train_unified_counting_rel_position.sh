@@ -21,6 +21,7 @@ accum_iter=32
 dropout=0.05
 lora_rank=128
 max_seq_len=2048
+validation_samples=100
 exp_name="lora128_counting_rel_position_und_wohead"
 output_dir="output/$exp_name"
 ckpt_max_keep=-1
@@ -53,6 +54,7 @@ python -m torch.distributed.run \
     --output_dir "$output_dir" \
     --save_iteration_interval 500 \
     --validation_interval 500 \
+    --validation_samples ${validation_samples} \
     --max_seq_len ${max_seq_len} \
     --dropout ${dropout} \
     --init_from ${init_from} \
