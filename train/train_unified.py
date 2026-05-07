@@ -453,7 +453,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--wo_lm_head", action="store_true", help="Without LM head in LoRA (for memory saving)")
         
         # Task Argument
-        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position", "celeb", "gender", "color"], help="Task type for understanding")
+        parser.add_argument("--task", type=str, default="counting", choices=["counting", "pointing", "ocr", "ocr_synthetic", "position", "rel_position", "celeb", "gender", "color", "counting+ocr_synthetic", "counting+rel_position"], help="Task type for understanding")
         parser.add_argument("--dataset_path", type=str, default=None, help="HF Dataset path (used for OCR task)")
         parser.add_argument("--validation_samples", type=int, default=100, help="Number of validation samples to use")
         parser.add_argument("--mode", type=str, default='und', choices=['und', 'gen', 'both'], help="Mode for text understanding/generation/both")
@@ -467,6 +467,7 @@ class Solver(FinetuneSolverBase):
         parser.add_argument("--eval_everything", action="store_true",
                             help="Run both understanding and generation validation regardless of --mode")
         parser.add_argument("--debug", action="store_true", help="Enable debug mode with smaller dataset and more frequent validation")
+        parser.add_argument("--skip_initial_validation", action="store_true", help="Skip initial validation before training starts")
 
         return parser
     
@@ -548,7 +549,7 @@ class Solver(FinetuneSolverBase):
         super().__init__(args)
         
         # Pre-download NLTK data and metrics for OCR task
-        if self.args.task in ['ocr', 'ocr_synthetic']:
+        if self.args.task in ['ocr', 'ocr_synthetic', 'counting+ocr_synthetic']:
             if self.global_rank == 0:
                 print("[Solver] Pre-loading NLTK data and metrics for OCR...")
                 try:
@@ -914,7 +915,7 @@ class Solver(FinetuneSolverBase):
             if self.global_rank == 0:
                 print(f"[Solver] Setting up validation prompts from heez/pixmo-point-count-gen-und...")
 
-            val_ds = load_dataset('heez/pixmo-point-count-gen-und', split="val_gen")
+            val_ds = load_dataset('heez/pixmo-point-count-gen-und', split="val_gen", num_proc=64)
 
             rng = random.Random(42)
             indices = rng.sample(range(len(val_ds)), min(10, len(val_ds)))
@@ -1065,6 +1066,10 @@ class Solver(FinetuneSolverBase):
             return self._load_gender_dataset()
         elif self.args.task == 'color':
             return self._load_color_dataset()
+        elif self.args.task == 'counting+ocr_synthetic':
+            return self._load_counting_ocr_synthetic_dataset()
+        elif self.args.task == 'counting+rel_position':
+            return self._load_counting_rel_position_dataset()
         else:
             return self._load_counting_pointing_dataset()
         
@@ -1073,11 +1078,11 @@ class Solver(FinetuneSolverBase):
         print("[Solver] Loading Position Dataset...")
         
         if self.args.task == 'position':
-            train_ds = load_dataset("heez/quadrant-position-new", split="train", streaming=False)
-            self.val_ds_stream = load_dataset("heez/quadrant-position-new", split="validation", streaming=False)
+            train_ds = load_dataset("heez/quadrant-position-new", split="train", streaming=False, num_proc=64)
+            self.val_ds_stream = load_dataset("heez/quadrant-position-new", split="validation", streaming=False, num_proc=64)
         elif self.args.task == 'rel_position':
-            train_ds = load_dataset("heez/relative-position-new", split="train", streaming=False)
-            self.val_ds_stream = load_dataset("heez/relative-position-new", split="validation", streaming=False)
+            train_ds = load_dataset("heez/relative-position-new", split="train", streaming=False, num_proc=64)
+            self.val_ds_stream = load_dataset("heez/relative-position-new", split="validation", streaming=False, num_proc=64)
         
         self.val_ds = self.val_ds_stream
 
@@ -1108,7 +1113,7 @@ class Solver(FinetuneSolverBase):
         
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
         
-        raw_dataset = load_dataset("agentlans/high-quality-english-sentences", split="train")
+        raw_dataset = load_dataset("agentlans/high-quality-english-sentences", split="train", num_proc=64)
 
         # Filter 200K
         raw_dataset = raw_dataset.select(list(range(0, 200_000)))
@@ -1133,7 +1138,7 @@ class Solver(FinetuneSolverBase):
         )
         
         # Gen Validation Dataset: test split에서 100개 샘플 선택
-        raw_dataset_val = load_dataset("agentlans/high-quality-english-sentences", split="test")
+        raw_dataset_val = load_dataset("agentlans/high-quality-english-sentences", split="test", num_proc=64)
         raw_dataset_val = raw_dataset_val.select(list(range(0, min(self.args.validation_samples, len(raw_dataset_val)))))
         self.val_ds = raw_dataset_val.map(
             lambda text: {
@@ -1144,8 +1149,92 @@ class Solver(FinetuneSolverBase):
         ) # Columns: 'text', 'descriptions', 'answer'
         
         return HFDatasetWrapper(train_gen_ds, train_und_ds, item_processor, default_task='ocr_synthetic', mode=self.args.mode)
-        
-        
+
+    def _load_counting_ocr_synthetic_dataset(self):
+        if self.args.mode != 'und':
+            raise ValueError(f"Task 'counting+ocr_synthetic' only supports --mode und, got '{self.args.mode}'")
+        if self.args.eval_everything:
+            raise ValueError("Task 'counting+ocr_synthetic' does not support --eval_everything (no gen dataset)")
+
+        print("[Solver] Loading Counting + OCR Rendered Mixed Dataset...")
+
+        # --- Counting understanding ---
+        train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False, num_proc=64)
+        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=False, num_proc=64)
+
+        if self.args.count_upper_limit is not None:
+            train_ds = train_ds.filter(lambda c: c <= self.args.count_upper_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream = self.val_ds_stream.filter(lambda c: c <= self.args.count_upper_limit, input_columns=['count'])
+        if self.args.count_lower_limit is not None:
+            train_ds = train_ds.filter(lambda c: c >= self.args.count_lower_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream = self.val_ds_stream.filter(lambda c: c >= self.args.count_lower_limit, input_columns=['count'])
+
+        train_und_counting = train_ds.filter(
+            lambda d: d is None or d == '', input_columns=['descriptions'], num_proc=64
+        )
+        train_und_counting = train_und_counting.map(
+            lambda _: {'task': 'counting'},
+            input_columns=['descriptions'], num_proc=64
+        )
+        self.train_und_ds_val = train_und_counting.select(range(min(100, len(train_und_counting))))
+
+        # --- OCR Rendered understanding ---
+        ocr_ds = load_dataset("Jiwon-Kang/OCR-Synthetic-Rendered-200K", num_proc=64)
+        train_und_ocr = ocr_ds["train"].map(
+            lambda _: {'task': 'ocr'},
+            input_columns=['question'], num_proc=64
+        )
+
+        # OCR validation: 첫 100개 고정 (validate_ocr()가 self.val_ds를 사용)
+        val_ocr = ocr_ds["validation"]
+        self.val_ds = val_ocr.select(range(min(100, len(val_ocr))))
+
+        # --- Concatenate & wrap ---
+        combined_und_ds = concatenate_datasets([train_und_counting, train_und_ocr])
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+        return HFDatasetWrapper(None, combined_und_ds, item_processor, default_task='counting', mode='und')
+
+    def _load_counting_rel_position_dataset(self):
+        if self.args.mode != 'und':
+            raise ValueError(f"Task 'counting+rel_position' only supports --mode und, got '{self.args.mode}'")
+        if self.args.eval_everything:
+            raise ValueError("Task 'counting+rel_position' does not support --eval_everything (no gen dataset)")
+
+        print("[Solver] Loading Counting + Relative Position Mixed Dataset...")
+
+        # --- Counting understanding ---
+        train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False, num_proc=64)
+        self.val_ds_stream_counting = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=False, num_proc=64)
+
+        if self.args.count_upper_limit is not None:
+            train_ds = train_ds.filter(lambda c: c <= self.args.count_upper_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream_counting = self.val_ds_stream_counting.filter(lambda c: c <= self.args.count_upper_limit, input_columns=['count'])
+        if self.args.count_lower_limit is not None:
+            train_ds = train_ds.filter(lambda c: c >= self.args.count_lower_limit, input_columns=['count'], num_proc=64)
+            self.val_ds_stream_counting = self.val_ds_stream_counting.filter(lambda c: c >= self.args.count_lower_limit, input_columns=['count'])
+
+        train_und_counting = train_ds.filter(
+            lambda d: d is None or d == '', input_columns=['descriptions'], num_proc=64
+        )
+        train_und_counting = train_und_counting.map(
+            lambda _: {'task': 'counting'},
+            input_columns=['descriptions'], num_proc=64
+        )
+        self.train_und_ds_val = train_und_counting.select(range(min(100, len(train_und_counting))))
+
+        # --- Relative Position understanding ---
+        train_und_rel = load_dataset("heez/relative-position-new", split="train", streaming=False, num_proc=64)
+        self.val_ds_stream = load_dataset("heez/relative-position-new", split="validation", streaming=False, num_proc=64)
+        train_und_rel = train_und_rel.map(
+            lambda _: {'task': 'rel_position'},
+            input_columns=['question'], num_proc=64
+        )
+
+        # --- Concatenate & wrap ---
+        combined_und_ds = concatenate_datasets([train_und_counting, train_und_rel])
+        item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
+        return HFDatasetWrapper(None, combined_und_ds, item_processor, default_task='counting', mode='und')
+
 
     def _load_ocr_dataset(self):
         print("[Solver] Loading OCR Dataset...")
@@ -1160,7 +1249,7 @@ class Solver(FinetuneSolverBase):
         else:
             if self.global_rank == 0:
                 print(f"[Dataset] Loading from Hugging Face Hub: {self.args.dataset_path}")
-            dataset = load_dataset(self.args.dataset_path)
+            dataset = load_dataset(self.args.dataset_path, num_proc=64)
 
         train_ds = dataset["train"]
         self.val_ds = dataset["validation"]
@@ -1186,9 +1275,9 @@ class Solver(FinetuneSolverBase):
 
     def _load_counting_pointing_dataset(self):
         print("[Solver] Loading Counting/Pointing Datasets...")
-        train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False)
+        train_ds = load_dataset("heez/pixmo-point-count-gen-und", split="train", streaming=False, num_proc=64)
 
-        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=False)
+        self.val_ds_stream = load_dataset("heez/pixmo-point-count-gen-und", split="val_und", streaming=False, num_proc=64)
 
         if self.args.count_upper_limit is not None:
             train_ds = train_ds.filter(lambda count: count <= self.args.count_upper_limit, input_columns=['count'], num_proc=64)
@@ -1207,8 +1296,8 @@ class Solver(FinetuneSolverBase):
 
     def _load_celeb_dataset(self):
         print("[Solver] Loading Celebrity Recognition Dataset...")
-        train_ds = load_dataset("heez/celeb-recognition", split="train", streaming=False)
-        self.val_ds = load_dataset("heez/celeb-recognition", split="test", streaming=False)
+        train_ds = load_dataset("heez/celeb-recognition", split="train", streaming=False, num_proc=64)
+        self.val_ds = load_dataset("heez/celeb-recognition", split="test", streaming=False, num_proc=64)
         self.val_ds_stream = self.val_ds
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
@@ -1220,10 +1309,10 @@ class Solver(FinetuneSolverBase):
 
     def _load_gender_dataset(self):
         print("[Solver] Loading Gender Bias Dataset...")
-        train_ds = load_dataset("heez/gender-bias", split="train", streaming=False)
+        train_ds = load_dataset("heez/gender-bias", split="train", streaming=False, num_proc=64)
 
         # Und Validation: use gender-bias test split
-        self.val_ds = load_dataset("heez/gender-bias", split="test", streaming=False)
+        self.val_ds = load_dataset("heez/gender-bias", split="test", streaming=False, num_proc=64)
         self.val_ds_stream = self.val_ds
 
         item_processor = self._item_processor_func(tokenizer=self.tokenizer, max_len=self.args.max_seq_len)
@@ -1264,11 +1353,11 @@ class Solver(FinetuneSolverBase):
         if os.path.exists(dataset_path):
              if self.global_rank == 0:
                  print(f"[Dataset] Loading from local ImageFolder: {dataset_path}")
-             dataset = load_dataset("imagefolder", data_dir=dataset_path)
+             dataset = load_dataset("imagefolder", data_dir=dataset_path, num_proc=64)
         else:
              if self.global_rank == 0:
                  print(f"[Dataset] Loading from Hugging Face Hub: {dataset_path}")
-             dataset = load_dataset(dataset_path)
+             dataset = load_dataset(dataset_path, num_proc=64)
 
         train_ds = dataset["train"]
         self.val_ds = dataset["validation"] if "validation" in dataset else dataset["test"] if "test" in dataset else None
@@ -1320,7 +1409,7 @@ class Solver(FinetuneSolverBase):
         local_rank = dist.get_rank() 
         world_size = dist.get_world_size()
         if self.global_rank == 0:
-            task_name = "Relative Positioning" if self.args.task == 'rel_position' else "Quadrant Positioning"
+            task_name = "Relative Positioning" if self.args.task in ['rel_position', 'counting+rel_position'] else "Quadrant Positioning"
             print(f"\n[Epoch {epoch} | Step {self.global_step}] Running Validation on {task_name}...")
         
         self.model.eval()
@@ -1498,9 +1587,12 @@ class Solver(FinetuneSolverBase):
         
         # Rank별로 local_dataset 리스트 준비
         if split == "val":
-            # All ranks iterate, but effectively they process the same data if not sharded. 
+            # All ranks iterate, but effectively they process the same data if not sharded.
             # For FSDP generation, they MUST run the same inputs to keep internal states synced.
-            eval_dataset = iter(self.val_ds_stream)
+            if self.args.task == 'counting+rel_position':
+                eval_dataset = iter(self.val_ds_stream_counting)
+            else:
+                eval_dataset = iter(self.val_ds_stream)
             local_dataset_list = []
             for i, _item in enumerate(eval_dataset):
                 if i >= eval_limit:
@@ -1542,9 +1634,9 @@ class Solver(FinetuneSolverBase):
                 if isinstance(image, dict) and 'bytes' in image:
                     image = Image.open(BytesIO(image['bytes'])).convert("RGB")
                 
-                if split == "train" :
-                    if self.args.task == "counting":
-                        question = item.get('question_count', '')
+                if split == "train":
+                    if self.args.task in ["counting", "counting+ocr_synthetic", "counting+rel_position"]:
+                        question = item.get('question_count', item.get('question', ''))
                 elif split == "val":
                     question = item.get('question', '')
                 question = question.replace('**<number>** of', '**<number>**') # Deprecated old format fix
@@ -2374,7 +2466,7 @@ class Solver(FinetuneSolverBase):
         run_und = self.args.eval_everything or self.args.mode in ['und', 'both']
         run_gen = self.args.eval_everything or self.args.mode in ['gen', 'both']
 
-        if run_und and self.args.wandb_run_id is None:
+        if run_und and self.args.wandb_run_id is None and self.args.skip_initial_validation is False:
             if self.args.task in ['ocr', 'ocr_synthetic']: # OCR
                 self.validate_ocr(self.start_epoch)
             elif self.args.task in ['position', 'rel_position']:
@@ -2385,6 +2477,14 @@ class Solver(FinetuneSolverBase):
                 self.validate_color(self.start_epoch)
             elif self.args.task == 'gender':
                 self.validate_gender(self.start_epoch)
+            elif self.args.task == 'counting+ocr_synthetic':
+                self.validate(self.start_epoch, format="counting", split="train")
+                self.validate(self.start_epoch, format="counting", split="val")
+                self.validate_ocr(self.start_epoch)
+            elif self.args.task == 'counting+rel_position':
+                self.validate(self.start_epoch, format="counting", split="train")
+                self.validate(self.start_epoch, format="counting", split="val")
+                self.validate_position(self.start_epoch)
             else: # Counting, Pointing
                 self.validate(self.start_epoch, format="counting", split="train")
                 self.validate(self.start_epoch, format="counting", split="val")
@@ -2392,7 +2492,7 @@ class Solver(FinetuneSolverBase):
                     self.validate(self.start_epoch, format="pointing", split="train")
                     self.validate(self.start_epoch, format="pointing", split="val")
 
-        if run_gen and self.args.wandb_run_id is None:
+        if run_gen and self.args.wandb_run_id is None and self.args.skip_initial_validation is False:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
             self.log_validation_images(self.global_step)
@@ -2625,7 +2725,7 @@ class Solver(FinetuneSolverBase):
                     with torch.no_grad():
                         image_tokens = encode_img_with_breaks(img, self.vqvae)
 
-                    if self.args.task in ['ocr', 'ocr_synthetic']:
+                    if self.args.task in ['ocr', 'ocr_synthetic', 'counting+ocr_synthetic', 'counting+rel_position']:
                         instruction = "<system>" + UNDERSTANDING_PROMPT_TEMPLATE + "</system>" + \
                                       "<user>" + question + "</user>"
                     else:
@@ -2732,6 +2832,14 @@ class Solver(FinetuneSolverBase):
                             self.validate_color(epoch)
                         elif self.args.task == 'gender':
                             self.validate_gender(epoch)
+                        elif self.args.task == 'counting+ocr_synthetic':
+                            self.validate(epoch, format="counting", split="train")
+                            self.validate(epoch, format="counting", split="val")
+                            self.validate_ocr(epoch)
+                        elif self.args.task == 'counting+rel_position':
+                            self.validate(epoch, format="counting", split="train")
+                            self.validate(epoch, format="counting", split="val")
+                            self.validate_position(epoch)
                         else:
                             self.validate(epoch, split="train")
                             self.validate(epoch, split="val")

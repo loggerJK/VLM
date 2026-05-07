@@ -321,6 +321,8 @@ class Solver(FinetuneSolverBase):
         # Dataset arguments
         parser.add_argument("--count_upper_limit", type=int, default=None, help="Upper limit for count. 20 means count<=20.")
         parser.add_argument("--count_lower_limit", type=int, default=None, help="Lower limit for count. 0 means count>=0.")
+        parser.add_argument("--skip_initial_validation", action="store_true", help="Skip initial validation before training starts")
+
         
         return parser
     
@@ -1177,14 +1179,14 @@ class Solver(FinetuneSolverBase):
 
         # Initial Validation (Unconditional)
         # self.save_checkpoint(epoch=self.start_epoch, iteration=0, global_step=self.global_step)
-        if self.args.mode in ['und', 'both']:
+        if self.args.mode in ['und', 'both'] and self.args.skip_initial_validation == False:
             self.validate(self.start_epoch, format="counting", split="train")
             self.validate(self.start_epoch, format="counting", split="val")
             if self.args.validation_as_pointing_format:
                 self.validate(self.start_epoch, format="pointing", split="train")
                 self.validate(self.start_epoch, format="pointing", split="val")
             
-        if self.args.mode in ['gen', 'both']:
+        if self.args.mode in ['gen', 'both'] and self.args.skip_initial_validation == False:
             if self.global_rank == 0:
                 print("[Solver] Logging validation images on wandb...")
             self.log_validation_images(self.global_step)
