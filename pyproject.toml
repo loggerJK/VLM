@@ -1,0 +1,43 @@
+[project]
+name = "audio-mmada"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.13.0",
+    "clip",
+    "datasets>=4.8.5",
+    "deepspeed>=0.18.9",
+    "diffusers==0.32.2",
+    "gradio>=4.44.1",
+    "image-reward>=1.5",
+    "jaxtyping>=0.3.7",
+    "lightning>=2.6.1",
+    "math-verify>=0.9.0",
+    "matplotlib>=3.10.9",
+    "nvitop>=1.6.2",
+    "omegaconf>=2.3.0",
+    "pandas>=2.3.3",
+    "peft>=0.19.1",
+    "pyarrow>=24.0.0",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "setuptools>=82.0.1",
+    "torch==2.5.1",
+    "torchmetrics==1.6.2",
+    "torchvision==0.20.1",
+    "transformers==4.46.0",
+    "trl==0.17.0",
+    "typeguard>=4.5.1",
+    "wandb>=0.26.1",
+    "webdataset>=1.0.2",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+clip = { git = "https://github.com/openai/CLIP.git" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
