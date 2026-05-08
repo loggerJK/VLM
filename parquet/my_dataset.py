@@ -597,6 +597,143 @@ class CountingDataset(IterableDataset):
         return batched
 
 
+class CountingGenDataset(IterableDataset):
+    """HuggingFace PixMo counting dataset for object-counting **generation** task (T2I).
+
+    Mirrors `CountingDataset` (same dataset, same shard/buffer/repeat skeleton) but flips
+    the descriptions filter to keep rows with non-empty `descriptions` (Lumina-DiMOO
+    `task=counting, mode=gen` parity, see train_unified.py:1196-1204) and emits T2I-shaped
+    samples (image tensor + raw caption string), matching `Text2ImageDataset`'s collate
+    so the existing T2I batch path consumes it unchanged.
+
+    No chat-template, no MMU prompt-target boundary — caption is the model's text
+    condition for image generation. Caption length truncation is delegated to
+    `UniversalPrompting.t2i_prompt` (max_text_len enforcement there).
+    """
+
+    def __init__(self,
+                 rank: int = 0,
+                 world_size: int = 1,
+                 resolution: int = 512,
+                 num_workers: int = 1,
+                 count_lower_limit: int = 0,
+                 count_upper_limit: int = 20,
+                 shuffle: bool = True,
+                 repeat: bool = True,
+                 buffer_size: int = 100):
+        super().__init__()
+        from datasets import load_dataset as hf_load_dataset
+        ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="train")
+        print(f"CountingGenDataset: original size {len(ds)}, applying count[{count_lower_limit},{count_upper_limit}] then descriptions filter...")
+
+        # Count range filter first (Lumina parity, train_unified.py:1196-1201).
+        ds = ds.filter(
+            lambda count: count is not None and count_lower_limit <= count <= count_upper_limit,
+            input_columns=["count"],
+            num_proc=32,
+        )
+        print(f"CountingGenDataset: after count filter {len(ds)}")
+
+        # Then keep gen subset only — robust to None / list / whitespace / empty list.
+        def _has_caption(d):
+            if d is None:
+                return False
+            if isinstance(d, list):
+                d = d[0] if d else ''
+            return isinstance(d, str) and d.strip() != ''
+
+        ds = ds.filter(_has_caption, input_columns=['descriptions'], num_proc=32)
+        print(f"CountingGenDataset: after descriptions filter {len(ds)}")
+
+        self.num_samples = len(ds)
+        all_indices = list(range(self.num_samples))
+        self.indices = all_indices[rank::world_size]
+        self.ds = ds
+        self.resolution = resolution
+        self.num_workers = num_workers
+        self.shuffle = shuffle
+        self.repeat = repeat
+        self.buffer_size = buffer_size
+
+        print(f"[CountingGenDataset] gen-subset size: {self.num_samples} "
+              f"(after count[{count_lower_limit},{count_upper_limit}] + descriptions filter); "
+              f"rank={rank}/{world_size} → local indices {len(self.indices)}")
+
+    def __iter__(self):
+        # Worker-level sharding on top of rank-level sharding.
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_indices = self.indices[worker_info.id::worker_info.num_workers]
+        else:
+            worker_indices = self.indices
+
+        while True:
+            index_list = list(worker_indices)
+            if self.shuffle:
+                random.shuffle(index_list)
+            buffer = []
+            for idx in index_list:
+                try:
+                    item = self.ds[idx]
+                    image = item['image']
+                    if not isinstance(image, Image.Image):
+                        image = Image.fromarray(image).convert('RGB')
+                    else:
+                        image = image.convert('RGB')
+
+                    caption = item.get('descriptions', None)
+                    if caption is None:
+                        continue
+                    if isinstance(caption, list):
+                        caption = caption[0] if caption else ''
+                    if not isinstance(caption, str):
+                        continue
+                    caption = caption.strip()
+                    if not caption:
+                        continue
+
+                    # Squash (not center-crop) — counting (und/gen) convention parity with
+                    # CountingDataset; differs from Lumina gen's center-crop but keeps
+                    # image distribution consistent across und/gen co-training.
+                    transformed_image = image_transform_squash(
+                        {'images': image}, resolution=self.resolution
+                    )['images']
+
+                    sample = {
+                        'images': transformed_image,
+                        'input_ids': caption,  # raw caption string (List[str] after collate)
+                    }
+                    buffer.append(sample)
+                    if len(buffer) >= self.buffer_size:
+                        if self.shuffle:
+                            random.shuffle(buffer)
+                        for buf_item in buffer:
+                            yield buf_item
+                        buffer = []
+                except Exception as e:
+                    print(f'Warning: CountingGenDataset error on index {idx}: {e}')
+                    continue
+
+            if buffer:
+                if self.shuffle:
+                    random.shuffle(buffer)
+                for buf_item in buffer:
+                    yield buf_item
+
+            if not self.repeat:
+                break
+
+    def collate_fn(self, batch):
+        batched = collections.defaultdict(list)
+        for data in batch:
+            for k, v in data.items():
+                batched[k].append(v)
+        for k, v in batched.items():
+            if k not in ('key', 'input_ids', 'similarity', 'answer'):
+                batched[k] = torch.stack(v, dim=0)
+        return batched
+
+
 class RelPositionDataset(IterableDataset):
     """HuggingFace heez/relative-position-new dataset for relative-position VQA.
 

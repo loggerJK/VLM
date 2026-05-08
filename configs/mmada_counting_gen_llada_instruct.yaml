@@ -1,0 +1,104 @@
+wandb:
+  entity: null
+  resume: 'auto'
+
+experiment:
+    project: "mmada-counting-gen"
+    name: "mmada-counting-gen-llada-instruct"
+    output_dir: "mmada-counting-gen-llada-instruct"
+    max_train_examples_t2i: 40000000
+    max_train_examples_mmu: 40000000
+    save_every: 5000
+    eval_every: 500
+    log_every: 10
+    log_grad_norm_every: 100
+    resume_from_checkpoint: "latest"
+    max_val_counting_gen_samples: 16
+    validate_before_train: False  # True 면 훈련 시작 전 val_gen wandb 로깅 1회 수행
+
+model:
+    vq_model:
+        type: "magvitv2"
+        vq_model_name: "showlab/magvitv2"
+
+    mmada:
+        tokenizer_path: "GSAI-ML/LLaDA-8B-Instruct"
+        pretrained_model_path: "Gen-Verse/MMaDA-8B-MixCoT"
+        w_clip_vit: False
+        new_vocab_size: 134656
+        llm_vocab_size: 126464
+        codebook_size: 8192
+        num_vq_tokens: 1024
+        num_new_special_tokens: 0
+        tie_word_embeddings: False
+
+    gradient_checkpointing: True
+
+dataset:
+    gen_type: "counting_gen"
+    und_type: "counting"   # 데이터 origin 명시 (스크립트 분기는 안 함)
+    combined_loader_mode: "max_size_cycle"
+    params:
+        # T2I-only counting generation: 데이터는 CountingGenDataset 이 자체 로드
+        count_lower_limit: 0   # Lumina parity: count 필터 → descriptions 분할
+        count_upper_limit: 20
+        shuffle_buffer_size: 1000
+        num_workers: 16
+        resolution: 512
+        pin_memory: True
+        persistent_workers: True
+
+    preprocessing:
+        max_seq_length: 256  # descriptions 는 multi-sentence 가능 → 128 보다 상향
+        resolution: 512
+        center_crop: False
+        random_flip: False
+
+optimizer:
+    name: adamw
+    params:
+        learning_rate: 2e-5
+        scale_lr: False
+        beta1: 0.9
+        beta2: 0.999
+        weight_decay: 0.01
+        epsilon: 1e-8
+
+lr_scheduler:
+    scheduler: "cosine"
+    params:
+        learning_rate: ${optimizer.params.learning_rate}
+        warmup_steps: 500
+        min_lr_scale: 0.1
+
+training:
+    gradient_accumulation_steps: 2
+    noise_type: "mask"
+    batch_size_t2i: 1   # override via shell wrapper
+    batch_size_lm: 0
+    batch_size_mmu: 0
+    mixed_precision: "bf16"
+    enable_tf32: True
+    seed: 10086
+    max_train_steps: 50000
+    overfit_one_batch: False
+    cond_dropout_prob: 0.1   # Stage2 baseline; CFG=4 와 함께 plateau 시 0.15-0.2 고려
+    min_masking_rate: 0.0
+    label_smoothing: 0.0
+    max_grad_norm: 1
+    guidance_scale: 4         # Lumina value
+    generation_timesteps: 64  # Lumina value
+    t2i_coeff: 1.0
+    lm_coeff: 0.0
+    mmu_coeff: 0.0
+
+mask_schedule:
+    schedule: "cosine"
+
+lora:
+    enable: True
+    rank: 128
+    alpha: 128
+    dropout: 0.05
+    target_modules: ["q_proj", "k_proj", "v_proj", "attn_out", "ff_proj", "up_proj"]
+    bias: "none"

@@ -341,3 +341,148 @@ torchrun --nproc-per-node=4 --master-port=54321 \
 #### Fix 1 (rel_position): trailing assistant header strip 안정화 (CRITICAL)
 
 위 counting 섹션의 Fix 6 와 동일한 문제 — `RelPositionDataset` 도 `apply_chat_template` + endswith strip 패턴을 사용하므로 같은 silent failure 가 발생. fix 도 동일하게 rfind 기반 robust strip + sanity check (`_trailing_asst_header` / `_assistant_header` 분리) 적용. 본 fix 는 counting Fix 6 와 함께 일괄 patch 됨 (`parquet/my_dataset.py` 의 세 dataset 클래스 — VQADataset, CountingDataset, RelPositionDataset — 동일 패턴 일관 적용). 검증: `prompt_masks == 0` 기준 target_head 가 `'\n\nThe ... top-right ...'` 같은 정답 문장으로 시작.
+
+---
+
+## Counting-Gen 이식 (T2I, 2026-05-09)
+
+### Goal
+
+Lumina-DiMOO `task=counting, mode=gen` 학습/평가 로직을 MMaDA 에 추가 이식. 동일한 `heez/pixmo-point-count-gen-und` 데이터셋을 사용하지만, 기존 counting (und) 가 **이미지→카운트 텍스트** MMU 였던 것과 달리 **descriptions(텍스트)→이미지** T2I 로 학습 목표 반전.
+
+- 데이터셋: `heez/pixmo-point-count-gen-und` (HF Hub) — train split 의 `descriptions` 컬럼이 비어있지 않은 row (gen subset, Lumina parity)
+- 베이스 모델: `Gen-Verse/MMaDA-8B-MixCoT`
+- 베이스 스크립트: `train_mmada_counting.py` (T2I-only 로 슬롯 교체)
+- 메트릭: 자동 카운팅 평가기 미부착 — wandb image table (caption / gt_count / gt_image / gen_image) 시각 로깅만 (Lumina parity)
+
+### 작업 내역
+
+#### 1. `parquet/my_dataset.py` — `CountingGenDataset` 추가
+
+- `CountingDataset` (und) 의 sharding/buffer/repeat 스켈레톤 mirror, chat_template 로직 제거.
+- HF 필터 순서 (Lumina `train_unified.py:1196-1204` parity): **count 범위 필터 → descriptions 분할**.
+  - count 필터: `count_lower_limit <= count <= count_upper_limit` (기본 0/20).
+  - descriptions 분할: gen 모드는 `descriptions` 가 non-empty 인 row 만 (CountingDataset 의 반대).
+- robust 필터 헬퍼 `_has_caption(d)`: `None` / `""` / `"   "` (whitespace) / `[]` / `["..."]` / `"..."` 모두 처리.
+- `__iter__` 가 `{'images': squashed_tensor, 'input_ids': caption_string}` yield → `Text2ImageDataset` collate 와 동일 shape, 기존 T2I 슬롯 그대로 소비 가능.
+- `image_transform_squash(resolution=512)` 사용 — counting (und/gen) 컨벤션 일관성 (Lumina gen 의 center-crop 과 다르지만 의도적 선택).
+- `self.num_samples = len(ds)` 노출 → 학습 스크립트가 직접 읽어 epoch 계산. `num_gen_train_samples` placeholder 불필요.
+- 캡션 길이 캡은 dataset 수준 X — `UniversalPrompting.t2i_prompt` 의 자체 truncate (L101-108) 에 위임.
+
+#### 2. `parquet/__init__.py` — `CountingGenDataset` export
+
+#### 3. `training/train_mmada_counting_gen.py` — 신규 학습 스크립트
+
+`train_mmada_counting.py` 베이스, MMU 슬롯 → T2I 슬롯 교체.
+
+- **`T2ITrainStepWrapper`**: 기존 `TrainStepWrapper` (`forward_process` 위임) 가 **사용 불가** — `forward_process` (`models/modeling_mmada.py:213-272`) 가 `batch_size_t2i==0` / `batch_size_lm==0` 가드는 있지만 `batch_size_mmu==0` 가드가 누락 (L246-249, L266-270). T2I-only 호출 시 `p_mask_mmu.to(...)` AttributeError + `masked_indices[-0:]` 가 Python slicing 의미상 전체 슬라이스 (`-0 == 0`) 라 의미적으로도 깨짐.
+- 모델 파일에 이미 정의된 `forward_t2i` (L355-378) 도 **그대로 위임 불가** — `attention_bias = torch.ones(...)` 가 `device=` 인자 누락 → CPU 텐서 → CUDA model forward 시 device mismatch. 코드베이스 어디서도 호출되지 않는 dead code.
+- 따라서 wrapper 내부에서 **device-safe T2I CE loss 인라인 계산**: `forward_process` L228-244 패턴을 `device=input_ids.device` 명시로 재현. 모델 파일 미수정.
+
+```python
+class T2ITrainStepWrapper(torch.nn.Module):
+    def forward(self, input_ids, labels, batch_size_t2i, max_seq_length, t2i_masks):
+        attention_bias = torch.ones(input_ids.shape[0], 1, ..., device=input_ids.device)
+        if batch_size_t2i > 0 and t2i_masks is not None:
+            attention_bias_t2i = (t2i_masks[:,:,None] & t2i_masks[:,None,:]).bool().unsqueeze(1)
+            attention_bias[:batch_size_t2i] = attention_bias_t2i.to(attention_bias.device)
+        logits = self.base(input_ids, attention_bias=attention_bias).logits
+        loss_t2i = F.cross_entropy(
+            logits[:batch_size_t2i, max_seq_length+1:].contiguous().view(-1, logits.shape[-1]),
+            labels[:batch_size_t2i, max_seq_length+1:].contiguous().view(-1),
+            ignore_index=-100,
+        )
+        return loss_t2i
+```
+
+- **데이터로더**: T2I-only. LM/MMU 슬롯 dataloader 빌드 자체 제거. `assert batch_size_t2i > 0`, `batch_size_lm == 0`, `batch_size_mmu == 0`.
+- **Step-0 sanity**: 이미지 영역만 마스크 카운트 — `labels_t2i[:, msl+2:-1]` slice (text + soi + image + eoi 중 순수 image 만). text label 의 -100 이나 soi/eoi 가 섞이지 않게.
+- **`validate_counting_gen()`**: `eval_every` 마다 실행
+  - `val_gen` split (max 16 샘플) 사용 — `validation_prompts_file` 기반 `generate_images` 호출 폐기.
+  - rank stride sharding (`sample_idx % world_size == rank`).
+  - 각 샘플: `t2i_gen` prompt + CFG (`uni_prompting(([caption], image_tokens), 't2i_gen')`) → `t2i_generate(...)` → `vq_model.decode_code` → PIL.
+  - **CRITICAL**: `t2i_generate(..., resolution=config.dataset.preprocessing.max_seq_length)` 명시 필수 (Fix 1 참고).
+  - PIL → BytesIO PNG bytes 로 변환 후 `dist.all_gather_object` (PIL pickle 안정성 이슈 회피, Lumina parity).
+  - rank 0 에서 `wandb.Table(columns=["sample_idx","caption","gt_count","gt_image","gen_image"])` → `wandb.log({"counting_gen/val_images": table})`.
+  - 모든 rank 가 함수 끝에서 `model.train()` 복귀 + 호출부 `accelerator.wait_for_everyone()`.
+
+#### 4. `configs/mmada_counting_gen_llada_instruct.yaml` — 훈련 설정
+
+| 항목 | 값 |
+|------|-----|
+| `pretrained_model_path` | `Gen-Verse/MMaDA-8B-MixCoT` |
+| `gen_type` / `und_type` | `"counting_gen"` / `"counting"` (origin 명시) |
+| `count_lower_limit / upper_limit` | 0 / 20 |
+| `batch_size_t2i` / `batch_size_lm` / `batch_size_mmu` | 1 / 0 / 0 |
+| `t2i_coeff` / `lm_coeff` / `mmu_coeff` | 1.0 / 0.0 / 0.0 |
+| `guidance_scale` | 4 (Lumina value) |
+| `generation_timesteps` | 64 (Lumina value) |
+| `cond_dropout_prob` | 0.1 (Stage2 baseline) |
+| `max_seq_length` | 256 (descriptions multi-sentence 대응; counting und 의 128 보다 상향) |
+| `resolution` | 512 |
+| `max_val_counting_gen_samples` | 16 |
+| `learning_rate` / `max_train_steps` | 2e-5 / 50000 |
+| LoRA rank | 128 |
+
+#### 5. Wrapper sh 4종
+
+`training/train_mmada_counting_gen_{1gpu,8gpu,autogpu,autogpu_debug}.sh` — counting wrapper 4종 mirror, target script + CONFIG 치환.
+- 모두 `training.batch_size_lm=0`, `training.batch_size_mmu=0` 명시 (config 실수 방지).
+- `_autogpu*.sh` : `training.batch_size_t2i=${TRAIN_BATCH_SIZE}` (counting 의 `batch_size_mmu` override 와 대응).
+- `_autogpu_debug.sh` : `MAX_TRAIN_STEPS=10 EVAL_EVERY=5 SAVE_EVERY=10 MAX_VAL_COUNTING_GEN_SAMPLES=4 experiment.validate_before_train=True`.
+
+### 실행 방법
+
+```bash
+# 1 GPU smoke
+bash training/train_mmada_counting_gen_1gpu.sh
+
+# 4/8 GPU auto, debug (10 step + validate_before_train)
+bash training/train_mmada_counting_gen_autogpu_debug.sh
+
+# 8 GPU DeepSpeed
+bash training/train_mmada_counting_gen_8gpu.sh
+
+# auto-detect 정식 학습
+bash training/train_mmada_counting_gen_autogpu.sh
+```
+
+### 파일 목록 (신규)
+
+| 파일 | 상태 |
+|---|---|
+| `parquet/my_dataset.py` | 수정 (`CountingGenDataset` 추가) |
+| `parquet/__init__.py` | 수정 (export 추가) |
+| `training/train_mmada_counting_gen.py` | 신규 (865 lines) |
+| `configs/mmada_counting_gen_llada_instruct.yaml` | 신규 |
+| `training/train_mmada_counting_gen_{1gpu,8gpu,autogpu,autogpu_debug}.sh` | 신규 4종 |
+
+### Counting-Gen Fix Log
+
+본 이식은 plan 단계에서 두 차례 review (Codex 1차/2차) 를 거치며 critical 이슈 6개 + recommended 보완 4개를 사전 차단. 모두 plan 반영 후 구현했으므로 별도 patch 가 아닌 design decision 으로 기록.
+
+#### Fix 1 (counting_gen, CRITICAL): `t2i_generate(resolution=...)` mismatch
+
+`models/modeling_mmada.py:118-211` 의 `t2i_generate` 의 `resolution` 인자는 이름과 달리 실제로는 **CFG text-prefix 길이** (`uncond_prefix = uncond_input_ids[:, :resolution+1]`, L153). 기본값 512 는 demo / stage3-cot config 의 `max_seq_length=512` 와 우연히 맞았던 값. 신규 counting-gen config 의 `max_seq_length=256` 으로 호출 시 default 512 면 uncond_prefix 가 text 영역(257)을 넘어 image 영역 일부를 포함 → cond/uncond 의 image 영역 차이 발생 → CFG 의미 손상.
+
+수정: `validate_counting_gen` 의 `t2i_generate` 호출에 `resolution=config.dataset.preprocessing.max_seq_length` 명시. 학습 시 `generate_images` 호출 자체를 제거했으므로 다른 호출 사이트는 없음. 추후 sanity 함수 추가 시에도 동일 인자 전달 필수.
+
+#### Fix 2 (counting_gen, CRITICAL): `forward_process` 의 `batch_size_mmu==0` 미가드 + `forward_t2i` device 버그
+
+(위 작업 내역 #3 의 `T2ITrainStepWrapper` 설명 참고.) wrapper 내부 device-safe 인라인 계산으로 두 버그 모두 회피, 모델 파일 미수정.
+
+#### Fix 3 (counting_gen): `descriptions` 타입 다양성 robust 처리
+
+HF schema 에서 `descriptions` 가 `None` / `""` / `"   "` (whitespace) / `[]` / `["..."]` / `"..."` 모두 가능. `_has_caption()` 헬퍼 + `__iter__` 의 `isinstance(caption, list)` 분기 + `caption.strip()` empty check 로 multi-layer 방어.
+
+#### Fix 4 (counting_gen): `dist.all_gather_object` PIL → PNG bytes 변환
+
+torch 빌드/버전에 따라 PIL 객체 pickle 이 깨질 수 있음. validation 결과를 `BytesIO` PNG bytes 로 변환 후 gather, rank 0 에서 `Image.open(BytesIO(...))` 로 복원해 `wandb.Table` 에 삽입 (Lumina parity).
+
+#### Fix 5 (counting_gen): `validation_prompts_file` 기반 `generate_images` 폐기
+
+사용자 결정사항 "validation 프롬프트 = `val_gen` split 만" 을 엄격히 준수. `validate_counting_gen` 이 `val_gen` captions 으로 wandb 시각 로깅 전담. config 에서도 `validation_prompts_file` 키 제거. 함수 정의는 추후 manual sanity 용도로 남길 수 있으나 main loop 호출 X.
+
+#### Fix 6 (counting_gen): step-0 sanity 의 이미지 영역만 카운트
+
+학습 loss 의 slicing 은 공식 `[:, msl+1:]` 패턴 그대로 (soi/eoi 가 ignore_id 라 CE 에서 자연 제거). 단 debug print 의 "masked image tokens" 값은 순수 이미지 토큰만 세도록 `[:, msl+2:-1]` slice 사용 — text label 의 -100 또는 soi/eoi 가 섞이지 않게.
