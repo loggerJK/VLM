@@ -334,9 +334,11 @@ class VQADataset(IterableDataset):
         else:
             self.list_data_dict = [item for item in raw_data if 'image' in item and 'conversations' in item]
         self.list_data_dict = self.list_data_dict[self.rank::self.world_size]
+        self._sot_token = '<|startoftext|>'
+        self._trailing_asst_header = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+        self._assistant_header = '<|start_header_id|>assistant<|end_header_id|>'
+
     def __iter__(self):
-        sot_token = '<|startoftext|>'
-        assistant_prompt_suffix = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n'
         while True:
             current_data_list = list(self.list_data_dict) 
             if self.shuffle:
@@ -378,13 +380,20 @@ class VQADataset(IterableDataset):
                     formatted_text = self.tokenizer.apply_chat_template(
                         messages,
                         tokenize=False,
-                        add_generation_prompt=True 
+                        add_generation_prompt=True
                     )
-                    if formatted_text.startswith(sot_token):
-                         formatted_text = formatted_text[len(sot_token):]
-                    if formatted_text.endswith(assistant_prompt_suffix):
-                        formatted_text = formatted_text[:-len(assistant_prompt_suffix)]
-                    token_ids = self.tokenizer(formatted_text)['input_ids'] 
+                    if formatted_text.startswith(self._sot_token):
+                         formatted_text = formatted_text[len(self._sot_token):]
+                    # Trailing 빈 assistant generation prompt 제거 (개행 개수에 robust)
+                    idx = formatted_text.rfind(self._trailing_asst_header)
+                    if idx != -1 and formatted_text[idx + len(self._trailing_asst_header):].strip() == '':
+                        formatted_text = formatted_text[:idx]
+                    # Sanity: answer 앞의 진짜 assistant header 가 살아있고 그 뒤 정답 텍스트가 있어야 함
+                    if self._assistant_header not in formatted_text:
+                        continue
+                    if not formatted_text.rsplit(self._assistant_header, 1)[-1].strip():
+                        continue
+                    token_ids = self.tokenizer(formatted_text)['input_ids']
                     if len(token_ids) > self.max_length:
                         continue 
                     sample = {
@@ -467,7 +476,8 @@ class CountingDataset(IterableDataset):
         self.repeat = repeat
         self.buffer_size = buffer_size
         self._sot_token = '<|startoftext|>'
-        self._asst_suffix = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n'
+        self._trailing_asst_header = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+        self._assistant_header = '<|start_header_id|>assistant<|end_header_id|>'
 
     def __iter__(self):
         # Worker-level sharding on top of rank-level sharding
@@ -518,8 +528,15 @@ class CountingDataset(IterableDataset):
                     )
                     if formatted_text.startswith(self._sot_token):
                         formatted_text = formatted_text[len(self._sot_token):]
-                    if formatted_text.endswith(self._asst_suffix):
-                        formatted_text = formatted_text[:-len(self._asst_suffix)]
+                    # Trailing 빈 assistant generation prompt 제거 (개행 개수에 robust)
+                    hidx = formatted_text.rfind(self._trailing_asst_header)
+                    if hidx != -1 and formatted_text[hidx + len(self._trailing_asst_header):].strip() == '':
+                        formatted_text = formatted_text[:hidx]
+                    # Sanity: answer 앞 assistant header + 그 뒤 정답 텍스트가 있어야 함
+                    if self._assistant_header not in formatted_text:
+                        continue
+                    if not formatted_text.rsplit(self._assistant_header, 1)[-1].strip():
+                        continue
 
                     if len(self.tokenizer(formatted_text)['input_ids']) > self.max_length:
                         continue
@@ -538,6 +555,130 @@ class CountingDataset(IterableDataset):
                         buffer = []
                 except Exception as e:
                     print(f'Warning: CountingDataset error on index {idx}: {e}')
+                    continue
+
+            if buffer:
+                if self.shuffle:
+                    random.shuffle(buffer)
+                for buf_item in buffer:
+                    yield buf_item
+
+            if not self.repeat:
+                break
+
+    def collate_fn(self, batch):
+        batched = collections.defaultdict(list)
+        for data in batch:
+            for k, v in data.items():
+                batched[k].append(v)
+        for k, v in batched.items():
+            if k not in ('key', 'input_ids', 'similarity', 'answer'):
+                batched[k] = torch.stack(v, dim=0)
+        return batched
+
+
+class RelPositionDataset(IterableDataset):
+    """HuggingFace heez/relative-position-new dataset for relative-position VQA.
+
+    Schema (verified): image (PIL 512x512), question (str with `Response format:` line),
+    answer (full sentence containing one position keyword), position (str: one of
+    top-left/top-right/bottom-left/bottom-right). 4 classes ~uniform.
+    """
+
+    def __init__(self,
+                 rank: int = 0,
+                 world_size: int = 1,
+                 tokenizer=None,
+                 resolution: int = 512,
+                 max_length: int = 8000,
+                 num_workers: int = 1,
+                 shuffle: bool = True,
+                 repeat: bool = True,
+                 buffer_size: int = 100):
+        super().__init__()
+        from datasets import load_dataset as hf_load_dataset
+        ds = hf_load_dataset("heez/relative-position-new", split="train")
+        print(f"RelPositionDataset: loaded {len(ds)} samples from heez/relative-position-new[train]")
+        all_indices = list(range(len(ds)))
+        self.indices = all_indices[rank::world_size]
+        self.ds = ds
+        self.tokenizer = tokenizer
+        self.resolution = resolution
+        self.max_length = max_length
+        self.num_workers = num_workers
+        self.shuffle = shuffle
+        self.repeat = repeat
+        self.buffer_size = buffer_size
+        self._sot_token = '<|startoftext|>'
+        self._trailing_asst_header = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+        self._assistant_header = '<|start_header_id|>assistant<|end_header_id|>'
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_indices = self.indices[worker_info.id::worker_info.num_workers]
+        else:
+            worker_indices = self.indices
+
+        while True:
+            index_list = list(worker_indices)
+            if self.shuffle:
+                random.shuffle(index_list)
+            buffer = []
+            for idx in index_list:
+                try:
+                    item = self.ds[idx]
+                    image = item['image']
+                    if not isinstance(image, Image.Image):
+                        image = Image.fromarray(image).convert('RGB')
+                    else:
+                        image = image.convert('RGB')
+
+                    question = item['question']
+                    raw_answer = str(item['answer']).strip()
+                    if not raw_answer:
+                        continue
+
+                    transformed_image = image_transform_squash(
+                        {'images': image}, resolution=self.resolution
+                    )['images']
+
+                    messages = [
+                        {'role': 'user', 'content': question},
+                        {'role': 'assistant', 'content': raw_answer},
+                    ]
+                    formatted_text = self.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                    if formatted_text.startswith(self._sot_token):
+                        formatted_text = formatted_text[len(self._sot_token):]
+                    # Trailing 빈 assistant generation prompt 제거 (개행 개수에 robust)
+                    hidx = formatted_text.rfind(self._trailing_asst_header)
+                    if hidx != -1 and formatted_text[hidx + len(self._trailing_asst_header):].strip() == '':
+                        formatted_text = formatted_text[:hidx]
+                    # Sanity: answer 앞 assistant header + 그 뒤 정답 텍스트가 있어야 함
+                    if self._assistant_header not in formatted_text:
+                        continue
+                    if not formatted_text.rsplit(self._assistant_header, 1)[-1].strip():
+                        continue
+
+                    if len(self.tokenizer(formatted_text)['input_ids']) > self.max_length:
+                        continue
+
+                    sample = {
+                        'images': transformed_image,
+                        'input_ids': formatted_text,
+                        'answer': str(item.get('position', '')),
+                    }
+                    buffer.append(sample)
+                    if len(buffer) >= self.buffer_size:
+                        if self.shuffle:
+                            random.shuffle(buffer)
+                        for buf_item in buffer:
+                            yield buf_item
+                        buffer = []
+                except Exception as e:
+                    print(f'Warning: RelPositionDataset error on index {idx}: {e}')
                     continue
 
             if buffer:

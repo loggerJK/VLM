@@ -11,8 +11,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Counting fine-tuning script for MMaDA.
-# Based on train_mmada_stage2.py; replaces MMU data with PixMo counting dataset.
+# Relative-position fine-tuning script for MMaDA.
+# Based on train_mmada_counting.py; replaces MMU data with heez/relative-position-new
+# (4-way spatial position VQA: top-left/top-right/bottom-left/bottom-right).
 
 import io
 import os
@@ -45,7 +46,7 @@ from accelerate.utils import DistributedType, InitProcessGroupKwargs, set_seed
 from training.data import Text2ImageDataset
 from training.utils import get_config, flatten_omega_conf, image_transform
 from training.imagenet_dataset import ImageNetDataset
-from parquet import RefinedWebDataset, CountingDataset
+from parquet import RefinedWebDataset, RelPositionDataset
 
 from models import MAGVITv2, get_mask_schedule, MMadaModelLM, MMadaConfig
 from training.prompting_utils import UniversalPrompting
@@ -71,27 +72,20 @@ logger = get_logger(__name__, log_level="INFO")
 # Utilities
 # ---------------------------------------------------------------------------
 
-def extract_number_fixed(text: str) -> int:
-    """Extract a count from model output (Lumina/BAGEL compatible).
+REL_POSITION_LABELS = ('top-left', 'top-right', 'bottom-left', 'bottom-right')
+_POS_RE = re.compile(r'(top-left|top-right|bottom-left|bottom-right)')
 
-    Priority: **N** > English word (zero-ten) > plain digit.
-    Returns -1 on failure.
+
+def extract_position(text: str):
+    """Extract first 4-way relative-position keyword from model output.
+
+    Returns one of REL_POSITION_LABELS or None on failure (Lumina parity:
+    train_unified.py:check_pos_accuracy).
     """
-    text = text.lower()
-    match = re.search(r"\*\*(\d+)\*\*", text)
-    if match:
-        return int(match.group(1))
-    word_to_num = {
-        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
-        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-    }
-    for word, num in word_to_num.items():
-        if re.search(r"\b" + word + r"\b", text):
-            return num
-    match = re.search(r"(\d+)", text)
-    if match:
-        return int(match.group(1))
-    return -1
+    if not text:
+        return None
+    matches = _POS_RE.findall(text.lower())
+    return matches[0] if matches else None
 
 
 def get_vq_model_class(model_type):
@@ -375,7 +369,7 @@ def main():
             raise ValueError(f"Unsupported gen_type: {config.dataset.gen_type}")
     else:
         train_dataloader_t2i = None
-        # CountingDataset is an IterableDataset(repeat=True); collapse epochs to 1.
+        # RelPositionDataset is an IterableDataset(repeat=True); collapse epochs to 1.
         num_update_steps_per_epoch = config.training.max_train_steps
         num_train_epochs = 1
 
@@ -397,24 +391,22 @@ def main():
     else:
         train_dataloader_lm = None
 
-    # Counting data (main MMU task)
-    assert config.dataset.und_type == "counting", (
-        f"This script expects und_type='counting', got '{config.dataset.und_type}'"
+    # RelPosition data (main MMU task)
+    assert config.dataset.und_type == "rel_position", (
+        f"This script expects und_type='rel_position', got '{config.dataset.und_type}'"
     )
-    dataset_counting = CountingDataset(
+    dataset_rel_position = RelPositionDataset(
         rank=accelerator.process_index,
         world_size=accelerator.num_processes,
         tokenizer=uni_prompting.text_tokenizer,
         resolution=preproc_config.resolution,
-        count_lower_limit=dataset_config.get("count_lower_limit", 0),
-        count_upper_limit=dataset_config.get("count_upper_limit", 20),
         num_workers=dataset_config.num_workers,
     )
     train_dataloader_mmu = DataLoader(
-        dataset_counting,
+        dataset_rel_position,
         batch_size=config.training.batch_size_mmu,
         sampler=None,
-        collate_fn=dataset_counting.collate_fn,
+        collate_fn=dataset_rel_position.collate_fn,
         num_workers=dataset_config.num_workers,
     )
 
@@ -426,20 +418,20 @@ def main():
     combined_dataloader = CombinedLoader(iterables, mode=config.dataset.combined_loader_mode)
 
     # ------------------------------------------------------------------
-    # Pre-load counting validation data (once)
+    # Pre-load rel_position validation data (once)
     # ------------------------------------------------------------------
-    val_counting_items = []
+    val_rel_position_items = []
     if accelerator.is_main_process:
-        logger.info("Pre-loading counting validation data (val_und split)...")
+        logger.info("Pre-loading rel_position validation data (validation split)...")
         try:
             from datasets import load_dataset as hf_load_dataset
-            val_ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="val_und")
-            max_val = config.experiment.get("max_val_counting_samples", 100)
+            val_ds = hf_load_dataset("heez/relative-position-new", split="validation")
+            max_val = config.experiment.get("max_val_rel_position_samples", 100)
             n = min(max_val, len(val_ds))
-            val_counting_items = [val_ds[i] for i in range(n)]
-            logger.info(f"Loaded {len(val_counting_items)} counting validation samples.")
+            val_rel_position_items = [val_ds[i] for i in range(n)]
+            logger.info(f"Loaded {len(val_rel_position_items)} rel_position validation samples.")
         except Exception as e:
-            logger.warning(f"Could not load counting validation data: {e}")
+            logger.warning(f"Could not load rel_position validation data: {e}")
 
     # ------------------------------------------------------------------
     # Resume from checkpoint
@@ -577,7 +569,7 @@ def main():
                 input_ids_list.append(input_ids_lm)
                 labels_list.append(labels_lm)
 
-            # Counting (MMU) — always present
+            # RelPosition (MMU) — always present
             pixel_values_mmu = batch["mmu_flow"]["images"].to(accelerator.device, non_blocking=True)
             texts_mmu = batch["mmu_flow"]["input_ids"]
             batch_size_mmu = pixel_values_mmu.shape[0]
@@ -691,7 +683,7 @@ def main():
                     )
                     logs = {
                         "step_loss_t2i": avg_loss_t2i.item(),
-                        "step_loss_mmu_counting": avg_loss_mmu.item(),
+                        "step_loss_mmu_rel_position": avg_loss_mmu.item(),
                         "step_loss_lm": avg_loss_lm.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
                         "avg_masking_rate": avg_masking_rate.item(),
@@ -703,7 +695,7 @@ def main():
                     logger.info(
                         f"Step: {global_step + 1} "
                         f"Loss_t2i: {avg_loss_t2i.item():0.4f} "
-                        f"Loss_counting: {avg_loss_mmu.item():0.4f} "
+                        f"Loss_rel_position: {avg_loss_mmu.item():0.4f} "
                         f"Loss_lm: {avg_loss_lm.item():0.4f} "
                         f"LR: {lr_scheduler.get_last_lr()[0]:0.6f} "
                         f"Mask: {avg_masking_rate.item():0.4f} "
@@ -727,15 +719,15 @@ def main():
                 )
 
                 if accelerator.is_main_process:
-                    if need_eval and val_counting_items:
-                        validate_counting(
+                    if need_eval and val_rel_position_items:
+                        validate_rel_position(
                             model,
                             vq_model,
                             uni_prompting,
                             accelerator,
                             config,
                             global_step + 1,
-                            val_counting_items,
+                            val_rel_position_items,
                         )
                     if need_gen:
                         generate_images(
@@ -769,11 +761,11 @@ def main():
 
 
 # ---------------------------------------------------------------------------
-# Counting validation
+# RelPosition validation
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def validate_counting(
+def validate_rel_position(
     model,
     vq_model,
     uni_prompting,
@@ -782,10 +774,10 @@ def validate_counting(
     global_step,
     val_items,
 ):
-    """Run counting validation and log accuracy / MAD / sample predictions to WandB."""
+    """Run rel_position validation and log accuracy / 4×4 CM / sample predictions to WandB."""
     from parquet.my_dataset import image_transform_squash
 
-    logger.info("Running counting validation...")
+    logger.info("Running rel_position validation...")
     model.eval()
 
     resolution = config.dataset.preprocessing.resolution
@@ -798,11 +790,11 @@ def validate_counting(
     else:
         weight_dtype = torch.float32
 
-    gt_counts, pred_counts, pred_answers, questions, sample_images = [], [], [], [], []
+    gt_positions, pred_positions, pred_answers, questions, sample_images = [], [], [], [], []
 
     total_samples = len(val_items)
     print("=" * 70)
-    print(f"Counting validation @ step {global_step}  ({total_samples} samples)")
+    print(f"RelPosition validation @ step {global_step}  ({total_samples} samples)")
     print("=" * 70)
 
     for item in val_items:
@@ -813,9 +805,13 @@ def validate_counting(
             else:
                 image = image.convert('RGB')
 
-            question = item.get('question', item.get('question_count', ''))
-            gt_count = int(item.get('count', -1))
-            if gt_count < 0:
+            question = item.get('question', '')
+            # GT = `position` field (verified always one of 4 labels in heez/relative-position-new)
+            gt_position = str(item.get('position', '')).strip().lower()
+            if gt_position not in REL_POSITION_LABELS:
+                # Fall back to regex on `answer` if `position` missing/malformed
+                gt_position = extract_position(item.get('answer', '')) or ''
+            if not gt_position:
                 continue
 
             pil_image = image.copy()
@@ -862,15 +858,15 @@ def validate_counting(
                 new_tok_ids, skip_special_tokens=False
             )
 
-            pred_count = extract_number_fixed(generated_text)
+            pred_position = extract_position(generated_text)
 
-            gt_counts.append(gt_count)
-            pred_counts.append(pred_count)
+            gt_positions.append(gt_position)
+            pred_positions.append(pred_position)
             pred_answers.append(generated_text)
             questions.append(question)
             sample_images.append(pil_image)
 
-            if len(gt_counts) == 1:
+            if len(gt_positions) == 1:
                 prompt_preview = uni_prompting.text_tokenizer.decode(
                     input_ids[0], skip_special_tokens=False
                 )
@@ -878,14 +874,15 @@ def validate_counting(
                 print(prompt_preview[-400:])
                 print("--- end preview ---")
 
-            mark = "✓" if pred_count == gt_count else ("?" if pred_count < 0 else "✗")
+            mark = "✓" if pred_position == gt_position else ("?" if pred_position is None else "✗")
             text_preview = generated_text.strip()
             if len(text_preview) > 60:
                 text_preview = text_preview[:60] + "..."
-            idx = len(gt_counts)
+            idx = len(gt_positions)
+            pred_disp = pred_position if pred_position is not None else 'N/A'
             print(
-                f"[{idx:3d}/{total_samples}] gt={gt_count:>2}  "
-                f"pred={pred_count:>2}  {mark}  {text_preview!r}"
+                f"[{idx:3d}/{total_samples}] gt={gt_position:>13}  "
+                f"pred={pred_disp:>13}  {mark}  {text_preview!r}"
             )
             n_new = int(new_tok_ids.numel())
             eos_id = uni_prompting.text_tokenizer.eos_token_id
@@ -895,68 +892,71 @@ def validate_counting(
             print(f"           raw[{n_new}t, {n_eos} EOS]: {raw_preview!r}")
 
         except Exception as e:
-            logger.warning(f"Counting validation error: {e}")
+            logger.warning(f"RelPosition validation error: {e}")
             continue
 
-    if not gt_counts:
+    if not gt_positions:
         model.train()
         return
 
-    total = len(gt_counts)
-    correct = sum(1 for g, p in zip(gt_counts, pred_counts) if g == p and p >= 0)
+    total = len(gt_positions)
+    correct = sum(1 for g, p in zip(gt_positions, pred_positions) if g == p and p is not None)
     accuracy = correct / total
+    parse_fails = sum(1 for p in pred_positions if p is None)
+    mismatches_n = total - correct
 
-    # Lumina parity: include parse failures (-1) in MAD so misses are penalised
-    deviations = [abs(g - p) for g, p in zip(gt_counts, pred_counts)]
-    mad = sum(deviations) / len(deviations) if deviations else 0.0
-
-    # Confusion matrix heatmap (0–20 fixed range)
+    # 4×4 Confusion matrix (parse-failure preds collapsed to a stub bucket so
+    # they don't count against any class — kept outside the matrix in print/log)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import seaborn as sns
     from sklearn.metrics import confusion_matrix as sk_confusion_matrix
 
-    fixed_labels = list(range(0, 21))
-    cm = sk_confusion_matrix(gt_counts, pred_counts, labels=fixed_labels)
-    fig_cm, ax_cm = plt.subplots(figsize=(12, 10))
+    fixed_labels = list(REL_POSITION_LABELS)
+    # Drop parse-fails entirely from CM (Lumina-style: they're penalised in `correct` already)
+    cm_pairs = [(g, p) for g, p in zip(gt_positions, pred_positions) if p is not None]
+    if cm_pairs:
+        cm_gt = [g for g, _ in cm_pairs]
+        cm_pred = [p for _, p in cm_pairs]
+        cm = sk_confusion_matrix(cm_gt, cm_pred, labels=fixed_labels)
+    else:
+        cm = np.zeros((4, 4), dtype=int)
+    fig_cm, ax_cm = plt.subplots(figsize=(7, 6))
     sns.heatmap(cm, annot=True, fmt='d', xticklabels=fixed_labels, yticklabels=fixed_labels,
                 cmap='viridis', ax=ax_cm)
     ax_cm.set_xlabel('Predicted')
     ax_cm.set_ylabel('Ground Truth')
-    ax_cm.set_title(f'Counting CM (step {global_step})  Acc: {accuracy:.4f}  MAD: {mad:.4f}')
+    ax_cm.set_title(f'RelPosition CM (step {global_step})  Acc: {accuracy:.4f}  ParseFails: {parse_fails}')
     cm_image = wandb.Image(fig_cm)
     plt.close(fig_cm)
 
-    # Prediction table — prefer mismatches first, cap at 10 samples (image included)
-    paired = list(zip(questions, gt_counts, pred_counts, pred_answers, sample_images))
+    paired = list(zip(questions, gt_positions, pred_positions, pred_answers, sample_images))
     mismatches = [p for p in paired if p[1] != p[2]]
     matches = [p for p in paired if p[1] == p[2]]
     table_rows = (mismatches + matches)[:10]
 
-    pred_table = wandb.Table(columns=["image", "question", "gt_count", "pred_count", "pred_answer"])
+    pred_table = wandb.Table(columns=["image", "question", "gt_position", "pred_position", "pred_answer"])
     for q, g, p, a, img in table_rows:
-        pred_table.add_data(wandb.Image(img), q, g, p, a)
+        pred_table.add_data(wandb.Image(img), q, g, str(p), a)
 
     wandb.log({
-        "counting/val_accuracy": accuracy,
-        "counting/val_mad": mad,
-        "counting/confusion_matrix": cm_image,
-        "counting/predictions": pred_table,
+        "rel_position/val_accuracy": accuracy,
+        "rel_position/parse_fails": parse_fails,
+        "rel_position/confusion_matrix": cm_image,
+        "rel_position/predictions": pred_table,
     }, step=global_step)
 
-    parse_fails = sum(1 for p in pred_counts if p < 0)
-    mismatches_n = total - correct
     print("-" * 70)
     print(
         f"Acc={accuracy:.4f} ({correct}/{total})  "
-        f"MAD={mad:.4f}  Mismatches={mismatches_n}  ParseFails={parse_fails}"
+        f"Mismatches={mismatches_n}  ParseFails={parse_fails}"
     )
     print("=" * 70)
 
     logger.info(
-        f"Counting validation step {global_step}: "
-        f"Accuracy={accuracy:.4f} ({correct}/{total}), MAD={mad:.4f}"
+        f"RelPosition validation step {global_step}: "
+        f"Accuracy={accuracy:.4f} ({correct}/{total}), ParseFails={parse_fails}"
     )
 
     model.train()
