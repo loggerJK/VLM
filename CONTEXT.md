@@ -189,6 +189,39 @@ if not formatted_text.rsplit(self._assistant_header, 1)[-1].strip():
 
 - 수정: 게이트를 rank-symmetric 으로 (`need_eval = (global_step+1) % eval_every == 0`), `val_counting_items` 데이터 가용성 체크는 `is_main_process` 분기 안쪽으로 이동. `accelerator.wait_for_everyone()` 호출 2회 → 1회, 모든 conditional 바깥으로 hoist.
 
+### Fix 7 (counting train): Lumina식 multi-GPU validation 이식
+
+`/mnt/data6/jiwon/lumina/train/train_unified.py` 의 counting validation 패턴을 MMaDA counting train-time validation 에 최소 diff 로 이식.
+
+- `training/train_mmada_counting.py`
+  - `validate_counting()` 을 모든 rank 에서 호출하도록 변경.
+  - validation 샘플을 `sample_idx % world_size == rank` 로 rank 별 stride sharding.
+  - rank 별 local shard 길이를 기준으로 `tqdm(position=rank)` progress bar 표시. 샘플별 예측 print 도 모든 rank 가 자기 shard 결과를 출력.
+  - 각 rank 의 local 결과를 `torch.distributed.all_gather_object()` 로 모은 뒤 rank 0 에서만 Accuracy / MAD / Confusion Matrix / WandB table 계산 및 로깅.
+  - MMaDA 의 기존 prompt 구성 (`apply_chat_template` + `<|mmu|><|soi|>image<|eoi|>`) 은 유지.
+  - validation 전역 RNG reseed 제거. `temperature=0.0` deterministic generation 이므로 validation 이 이후 training randomness 를 rank 별로 오염시키지 않게 함.
+  - `validate_before_train` 추가: true 일 때 training 시작 전 step `global_step` 기준 baseline validation 수행.
+  - epoch logging 추가: counting-only IterableDataset 에 대해 `225914 // total_batch_size` 기준 epoch progress 를 wandb/log 에 기록.
+  - `answer_format` 전달 추가 (`sentence` / `number`).
+- `parquet/my_dataset.py`
+  - `CountingDataset(answer_format="sentence")` 인자 추가.
+  - `answer_format="number"` 일 때 target 을 raw count string 으로 만들고, question 은 `"Response Example"` 앞부분만 사용.
+- `configs/mmada_counting_llada_instruct.yaml`
+  - `experiment.validate_before_train`
+  - `dataset.params.answer_format`
+  - `dataset.preprocessing.max_seq_length` 설명 주석 추가.
+- `training/train_mmada_counting_autogpu_debug.sh`
+  - 고정 absolute `cd` 제거.
+  - debug batch 를 `TRAIN_BATCH_SIZE=1` 로 낮춤.
+  - `experiment.name`, `answer_format`, `max_seq_length`, `validate_before_train`, `max_train_steps` override 추가.
+
+검증:
+
+```bash
+python -m py_compile training/train_mmada_counting.py
+git diff --check -- training/train_mmada_counting.py
+```
+
 ---
 
 ## RelPosition 이식 (2025-05-08)

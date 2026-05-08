@@ -34,6 +34,7 @@ from PIL import Image
 from omegaconf import OmegaConf
 import wandb
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from lightning.pytorch.utilities import CombinedLoader
 
@@ -55,6 +56,7 @@ from models.logging import set_verbosity_info, set_verbosity_error
 
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 from training.utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens, AverageMeter
 
@@ -376,8 +378,9 @@ def main():
     else:
         train_dataloader_t2i = None
         # CountingDataset is an IterableDataset(repeat=True); collapse epochs to 1.
-        num_update_steps_per_epoch = config.training.max_train_steps
-        num_train_epochs = 1
+        num_update_steps_per_epoch = 225914 // total_batch_size  # 225914 is the number of samples in the counting dataset
+        num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
+        # num_train_epochs = 1
 
     # LM data (regularization) — only build when batch_size_lm > 0
     if config.training.batch_size_lm > 0:
@@ -409,6 +412,7 @@ def main():
         count_lower_limit=dataset_config.get("count_lower_limit", 0),
         count_upper_limit=dataset_config.get("count_upper_limit", 20),
         num_workers=dataset_config.num_workers,
+        answer_format=dataset_config.get("answer_format", "sentence"),  # "sentence" or "number"
     )
     train_dataloader_mmu = DataLoader(
         dataset_counting,
@@ -429,17 +433,16 @@ def main():
     # Pre-load counting validation data (once)
     # ------------------------------------------------------------------
     val_counting_items = []
-    if accelerator.is_main_process:
-        logger.info("Pre-loading counting validation data (val_und split)...")
-        try:
-            from datasets import load_dataset as hf_load_dataset
-            val_ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="val_und")
-            max_val = config.experiment.get("max_val_counting_samples", 100)
-            n = min(max_val, len(val_ds))
-            val_counting_items = [val_ds[i] for i in range(n)]
-            logger.info(f"Loaded {len(val_counting_items)} counting validation samples.")
-        except Exception as e:
-            logger.warning(f"Could not load counting validation data: {e}")
+    logger.info("Pre-loading counting validation data (val_und split)...")
+    try:
+        from datasets import load_dataset as hf_load_dataset
+        val_ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="val_und")
+        max_val = config.experiment.get("max_val_counting_samples", 100)
+        n = min(max_val, len(val_ds))
+        val_counting_items = [val_ds[i] for i in range(n)]
+        logger.info(f"Loaded {len(val_counting_items)} counting validation samples.")
+    except Exception as e:
+        logger.warning(f"Could not load counting validation data: {e}")
 
     # ------------------------------------------------------------------
     # Resume from checkpoint
@@ -530,11 +533,25 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
+    if config.experiment.get("validate_before_train", False):
+        validate_counting(
+            model,
+            vq_model,
+            uni_prompting,
+            accelerator,
+            config,
+            global_step,
+            val_counting_items,
+            answer_format=dataset_config.get("answer_format", "sentence")
+        )
+
+    accelerator.wait_for_everyone()
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
     logger.info(f"  Batch size per device = {total_batch_size_per_gpu}")
     logger.info(f"  Total train batch size = {total_batch_size}")
     logger.info(f"  Gradient accumulation steps = {config.training.gradient_accumulation_steps}")
+    logger.info(f"  Total training epochs = {num_train_epochs}")
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
@@ -542,6 +559,7 @@ def main():
 
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
+        num_update_step = 0  # Track gradient update steps within each epoch
         for batch, batch_idx, dataloader_idx in combined_dataloader:
             data_time_m.update(time.time() - end)
 
@@ -596,7 +614,8 @@ def main():
                     print(repr(texts_mmu[0][-500:]))
                     print("=== PROMPT TAIL (decoded input_ids_mmu, 80 tok before target) ===")
                     print(repr(_tok.decode(
-                        input_ids_mmu[0, max(0, first_target - 80):first_target].tolist(),
+                        # input_ids_mmu[0, max(0, first_target - 80):first_target].tolist(),
+                        input_ids_mmu[0, :first_target].tolist(),
                         skip_special_tokens=False,
                     )))
                     print("=== TARGET HEAD (decoded input_ids_mmu, 80 tok from target) ===")
@@ -604,6 +623,8 @@ def main():
                         input_ids_mmu[0, first_target:first_target + 80].tolist(),
                         skip_special_tokens=False,
                     )))
+                    print(f"=== PROMPT LENGTH: {first_target} | TARGET LENGTH: {(prompt_masks[0] == 0).sum().item()} | TOTAL LENGTH: {input_ids_mmu.shape[-1]} ===")
+
                 else:
                     print("WARN: prompt_masks[0] has no target positions (all 1)")
 
@@ -682,6 +703,7 @@ def main():
             if accelerator.sync_gradients:
                 batch_time_m.update(time.time() - end)
                 end = time.time()
+                num_update_step += 1  # Increment on actual gradient updates
 
                 if (global_step + 1) % config.experiment.log_every == 0:
                     samples_per_second_per_gpu = (
@@ -689,6 +711,8 @@ def main():
                         * total_batch_size_per_gpu
                         / batch_time_m.val
                     )
+                    # Calculate epoch with decimal precision based on update steps
+                    epoch_progress = epoch + (num_update_step - 1) / num_update_steps_per_epoch
                     logs = {
                         "step_loss_t2i": avg_loss_t2i.item(),
                         "step_loss_mmu_counting": avg_loss_mmu.item(),
@@ -698,10 +722,12 @@ def main():
                         "samples/sec/gpu": samples_per_second_per_gpu,
                         "data_time": data_time_m.val,
                         "batch_time": batch_time_m.val,
+                        "epoch": epoch_progress,
                     }
                     accelerator.log(logs, step=global_step + 1)
                     logger.info(
                         f"Step: {global_step + 1} "
+                        f"Epoch: {epoch_progress:.2f} "
                         f"Loss_t2i: {avg_loss_t2i.item():0.4f} "
                         f"Loss_counting: {avg_loss_mmu.item():0.4f} "
                         f"Loss_lm: {avg_loss_lm.item():0.4f} "
@@ -726,17 +752,19 @@ def main():
                     )
                 )
 
+                if need_eval:
+                    validate_counting(
+                        model,
+                        vq_model,
+                        uni_prompting,
+                        accelerator,
+                        config,
+                        global_step + 1,
+                        val_counting_items,
+                        answer_format=dataset_config.get("answer_format", "sentence")
+                    )
+
                 if accelerator.is_main_process:
-                    if need_eval and val_counting_items:
-                        validate_counting(
-                            model,
-                            vq_model,
-                            uni_prompting,
-                            accelerator,
-                            config,
-                            global_step + 1,
-                            val_counting_items,
-                        )
                     if need_gen:
                         generate_images(
                             model, vq_model, uni_prompting, accelerator, config,
@@ -781,11 +809,18 @@ def validate_counting(
     config,
     global_step,
     val_items,
+    answer_format="sentence",
 ):
     """Run counting validation and log accuracy / MAD / sample predictions to WandB."""
     from parquet.my_dataset import image_transform_squash
 
-    logger.info("Running counting validation...")
+    rank = accelerator.process_index
+    world_size = accelerator.num_processes
+    is_main = accelerator.is_main_process
+
+    if is_main:
+        print(f"[INFO] Using answer_format={answer_format} for counting validation.")
+        logger.info("Running counting validation...")
     model.eval()
 
     resolution = config.dataset.preprocessing.resolution
@@ -798,14 +833,33 @@ def validate_counting(
     else:
         weight_dtype = torch.float32
 
-    gt_counts, pred_counts, pred_answers, questions, sample_images = [], [], [], [], []
+    local_results = []
 
     total_samples = len(val_items)
-    print("=" * 70)
-    print(f"Counting validation @ step {global_step}  ({total_samples} samples)")
-    print("=" * 70)
+    if is_main:
+        print("=" * 70)
+        print(
+            f"Counting validation @ step {global_step}  "
+            f"({total_samples} samples, {world_size} ranks)"
+        )
+        print("=" * 70)
 
-    for item in val_items:
+    local_items = [
+        (sample_idx, item)
+        for sample_idx, item in enumerate(val_items)
+        if sample_idx % world_size == rank
+    ]
+    local_total = len(local_items)
+    iterator = tqdm(
+        local_items,
+        total=local_total,
+        desc=f"Counting val rank {rank}",
+        position=rank,
+        leave=True,
+        dynamic_ncols=True,
+    )
+
+    for sample_idx, item in iterator:
         try:
             image = item['image']
             if not isinstance(image, Image.Image):
@@ -817,6 +871,16 @@ def validate_counting(
             gt_count = int(item.get('count', -1))
             if gt_count < 0:
                 continue
+
+            if answer_format == "number":
+                # question을 "Response Example" 전까지 자른다
+                target_substring = "Response Example"
+                if target_substring in question:
+                    question = question.split(target_substring)[0].strip()
+                else:
+                    # Warning: "Response Example:" not found in question, using full question text
+                    print(f"Warning: 'Response Example:' not found in question for index {sample_idx}")
+                    continue
 
             pil_image = image.copy()
 
@@ -847,9 +911,9 @@ def validate_counting(
             with torch.autocast("cuda", dtype=weight_dtype, enabled=accelerator.mixed_precision != "no"):
                 output_ids = accelerator.unwrap_model(model).mmu_generate(
                     input_ids,
-                    max_new_tokens=64,
-                    steps=64,
-                    block_length=64,
+                    max_new_tokens=64 if answer_format == "sentence" else 16,
+                    steps=64 if answer_format == "sentence" else 16,
+                    block_length=64 if answer_format == "sentence" else 16,
                     temperature=0.0,
                     remasking='low_confidence',
                 )
@@ -864,17 +928,20 @@ def validate_counting(
 
             pred_count = extract_number_fixed(generated_text)
 
-            gt_counts.append(gt_count)
-            pred_counts.append(pred_count)
-            pred_answers.append(generated_text)
-            questions.append(question)
-            sample_images.append(pil_image)
+            local_results.append({
+                "sample_idx": sample_idx,
+                "question": question,
+                "gt_count": gt_count,
+                "pred_count": pred_count,
+                "pred_answer": generated_text,
+                "image": pil_image,
+            })
 
-            if len(gt_counts) == 1:
+            if len(local_results) == 1:
                 prompt_preview = uni_prompting.text_tokenizer.decode(
                     input_ids[0], skip_special_tokens=False
                 )
-                print("--- Prompt preview (first sample, last 400 chars) ---")
+                print(f"--- Prompt preview (rank {rank}, first local sample, last 400 chars) ---")
                 print(prompt_preview[-400:])
                 print("--- end preview ---")
 
@@ -882,9 +949,10 @@ def validate_counting(
             text_preview = generated_text.strip()
             if len(text_preview) > 60:
                 text_preview = text_preview[:60] + "..."
-            idx = len(gt_counts)
+            local_idx = len(local_results)
             print(
-                f"[{idx:3d}/{total_samples}] gt={gt_count:>2}  "
+                f"[rank {rank} {local_idx:3d}/{local_total}] "
+                f"sample={sample_idx:>3}  gt={gt_count:>2}  "
                 f"pred={pred_count:>2}  {mark}  {text_preview!r}"
             )
             n_new = int(new_tok_ids.numel())
@@ -895,12 +963,32 @@ def validate_counting(
             print(f"           raw[{n_new}t, {n_eos} EOS]: {raw_preview!r}")
 
         except Exception as e:
-            logger.warning(f"Counting validation error: {e}")
+            logger.warning(f"Counting validation error on rank {rank}, index {sample_idx}: {e}")
             continue
 
-    if not gt_counts:
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        all_results = [None for _ in range(world_size)]
+        dist.barrier()
+        dist.all_gather_object(all_results, local_results)
+        results = [item for shard in all_results if shard for item in shard]
+    else:
+        results = local_results
+
+    if not is_main:
         model.train()
         return
+
+    results = sorted(results, key=lambda item: item["sample_idx"])
+
+    if not results:
+        model.train()
+        return
+
+    gt_counts = [item["gt_count"] for item in results]
+    pred_counts = [item["pred_count"] for item in results]
+    pred_answers = [item["pred_answer"] for item in results]
+    questions = [item["question"] for item in results]
+    sample_images = [item["image"] for item in results]
 
     total = len(gt_counts)
     correct = sum(1 for g, p in zip(gt_counts, pred_counts) if g == p and p >= 0)

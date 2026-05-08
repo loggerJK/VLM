@@ -13,7 +13,6 @@
 
 set -euo pipefail
 
-cd /data/mm-llm-backbone_890/personal/sirius/audio_ablation/audio_mmada
 source env.sh
 
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
@@ -34,7 +33,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-}
 LEARNING_RATE=${LEARNING_RATE:-}
 NGPUS=${NUM_PROCESSES}
 EFFECTIVE_BATCH_SIZE=64
-TRAIN_BATCH_SIZE=2
+TRAIN_BATCH_SIZE=1
 GRAD_ACCUM_STEPS=$((EFFECTIVE_BATCH_SIZE / (TRAIN_BATCH_SIZE * NGPUS)))
 
 
@@ -57,9 +56,13 @@ echo "  OUTPUT_DIR      : ${OUTPUT_DIR:-<from YAML>}"
 echo "  LEARNING_RATE   : ${LEARNING_RATE:-<from YAML>}"
 echo "========================================"
 
+
+# answer_format="number" 기준: max_seq_length 64로 충분
+
 accelerate launch --config_file "${ACCEL_CONFIG}" \
     --num_processes "${NUM_PROCESSES}" \
     training/train_mmada_counting.py \
+    experiment.name="DEBUG_COUNTING" \
     experiment.resume_from_checkpoint=null \
     config="${CONFIG}" \
     training.gradient_accumulation_steps=${GRAD_ACCUM_STEPS} \
@@ -68,4 +71,8 @@ accelerate launch --config_file "${ACCEL_CONFIG}" \
     experiment.save_every=${SAVE_EVERY} \
     experiment.eval_every=${EVAL_EVERY} \
     experiment.max_val_counting_samples=${MAX_VAL_COUNTING_SAMPLES} \
+    dataset.params.answer_format="sentence" \
+    dataset.preprocessing.max_seq_length=64 \
+    experiment.validate_before_train=True \
+    training.max_train_steps=${MAX_TRAIN_STEPS} \
     "${OVERRIDES[@]}"

@@ -444,7 +444,9 @@ class CountingDataset(IterableDataset):
                  count_upper_limit: int = 20,
                  shuffle: bool = True,
                  repeat: bool = True,
-                 buffer_size: int = 100):
+                 buffer_size: int = 100,
+                 answer_format: str = "sentence"
+                 ):
         super().__init__()
         from datasets import load_dataset as hf_load_dataset
         ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="train")
@@ -475,6 +477,8 @@ class CountingDataset(IterableDataset):
         self.shuffle = shuffle
         self.repeat = repeat
         self.buffer_size = buffer_size
+        self.answer_format = answer_format
+        print(f"[INFO] Using answer format: {self.answer_format.upper()}")
         self._sot_token = '<|startoftext|>'
         self._trailing_asst_header = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
         self._assistant_header = '<|start_header_id|>assistant<|end_header_id|>'
@@ -518,6 +522,22 @@ class CountingDataset(IterableDataset):
                     transformed_image = image_transform_squash(
                         {'images': image}, resolution=self.resolution
                     )['images']
+
+                    if self.answer_format == "number":
+                        count_val = item.get('count', None)
+                        if count_val is None:
+                            # Warning: count value missing, skipping this sample
+                            print(f"Warning: count value missing for index {idx}, skipping sample.")
+                            continue
+                        raw_answer = str(count_val)
+                        # question을 "Response Example" 전까지 자른다
+                        target_substring = "Response Example"
+                        if target_substring in question:
+                            question = question.split(target_substring)[0].strip()
+                        else:
+                            # Warning: "Response Example:" not found in question, using full question text
+                            print(f"Warning: 'Response Example:' not found in question for index {idx}")
+                            continue
 
                     messages = [
                         {'role': 'user', 'content': question},
