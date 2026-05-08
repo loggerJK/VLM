@@ -16,6 +16,9 @@ set -euo pipefail
 cd /data/mm-llm-backbone_890/personal/sirius/audio_ablation/audio_mmada
 source env.sh
 
+export WANDB_MODE=offline
+# export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=0
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     NUM_PROCESSES=$(awk -F',' '{print NF}' <<< "${CUDA_VISIBLE_DEVICES}")
@@ -34,7 +37,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-}
 LEARNING_RATE=${LEARNING_RATE:-}
 NGPUS=${NUM_PROCESSES}
 EFFECTIVE_BATCH_SIZE=64
-TRAIN_BATCH_SIZE=2
+TRAIN_BATCH_SIZE=1
 GRAD_ACCUM_STEPS=$((EFFECTIVE_BATCH_SIZE / (TRAIN_BATCH_SIZE * NGPUS)))
 
 
@@ -57,9 +60,12 @@ echo "  OUTPUT_DIR      : ${OUTPUT_DIR:-<from YAML>}"
 echo "  LEARNING_RATE   : ${LEARNING_RATE:-<from YAML>}"
 echo "========================================"
 
+# rel_position 문장형 target 기준: max_seq_length 128 충분
+
 accelerate launch --config_file "${ACCEL_CONFIG}" \
     --num_processes "${NUM_PROCESSES}" \
     training/train_mmada_rel_position.py \
+    experiment.name="DEBUG_REL_POSITION" \
     experiment.resume_from_checkpoint=null \
     config="${CONFIG}" \
     training.gradient_accumulation_steps=${GRAD_ACCUM_STEPS} \
@@ -68,4 +74,7 @@ accelerate launch --config_file "${ACCEL_CONFIG}" \
     experiment.save_every=${SAVE_EVERY} \
     experiment.eval_every=${EVAL_EVERY} \
     experiment.max_val_rel_position_samples=${MAX_VAL_REL_POSITION_SAMPLES} \
+    dataset.preprocessing.max_seq_length=128 \
+    experiment.validate_before_train=True \
+    training.max_train_steps=${MAX_TRAIN_STEPS} \
     "${OVERRIDES[@]}"

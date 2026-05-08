@@ -35,6 +35,7 @@ from PIL import Image
 from omegaconf import OmegaConf
 import wandb
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from lightning.pytorch.utilities import CombinedLoader
 
@@ -56,6 +57,7 @@ from models.logging import set_verbosity_info, set_verbosity_error
 
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 from training.utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens, AverageMeter
 
@@ -369,9 +371,8 @@ def main():
             raise ValueError(f"Unsupported gen_type: {config.dataset.gen_type}")
     else:
         train_dataloader_t2i = None
-        # RelPositionDataset is an IterableDataset(repeat=True); collapse epochs to 1.
-        num_update_steps_per_epoch = config.training.max_train_steps
-        num_train_epochs = 1
+        num_update_steps_per_epoch = None
+        num_train_epochs = None
 
     # LM data (regularization) — only build when batch_size_lm > 0
     if config.training.batch_size_lm > 0:
@@ -402,6 +403,11 @@ def main():
         resolution=preproc_config.resolution,
         num_workers=dataset_config.num_workers,
     )
+    if train_dataloader_t2i is None:
+        # RelPositionDataset is an IterableDataset(repeat=True); estimate epochs from train rows.
+        num_update_steps_per_epoch = max(1, len(dataset_rel_position.ds) // total_batch_size)
+        num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
+
     train_dataloader_mmu = DataLoader(
         dataset_rel_position,
         batch_size=config.training.batch_size_mmu,
@@ -421,17 +427,16 @@ def main():
     # Pre-load rel_position validation data (once)
     # ------------------------------------------------------------------
     val_rel_position_items = []
-    if accelerator.is_main_process:
-        logger.info("Pre-loading rel_position validation data (validation split)...")
-        try:
-            from datasets import load_dataset as hf_load_dataset
-            val_ds = hf_load_dataset("heez/relative-position-new", split="validation")
-            max_val = config.experiment.get("max_val_rel_position_samples", 100)
-            n = min(max_val, len(val_ds))
-            val_rel_position_items = [val_ds[i] for i in range(n)]
-            logger.info(f"Loaded {len(val_rel_position_items)} rel_position validation samples.")
-        except Exception as e:
-            logger.warning(f"Could not load rel_position validation data: {e}")
+    logger.info("Pre-loading rel_position validation data (validation split)...")
+    try:
+        from datasets import load_dataset as hf_load_dataset
+        val_ds = hf_load_dataset("heez/relative-position-new", split="validation")
+        max_val = config.experiment.get("max_val_rel_position_samples", 100)
+        n = min(max_val, len(val_ds))
+        val_rel_position_items = [val_ds[i] for i in range(n)]
+        logger.info(f"Loaded {len(val_rel_position_items)} rel_position validation samples.")
+    except Exception as e:
+        logger.warning(f"Could not load rel_position validation data: {e}")
 
     # ------------------------------------------------------------------
     # Resume from checkpoint
@@ -522,11 +527,25 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
+    if config.experiment.get("validate_before_train", False):
+        validate_rel_position(
+            model,
+            vq_model,
+            uni_prompting,
+            accelerator,
+            config,
+            global_step,
+            val_rel_position_items,
+        )
+
+    accelerator.wait_for_everyone()
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
     logger.info(f"  Batch size per device = {total_batch_size_per_gpu}")
     logger.info(f"  Total train batch size = {total_batch_size}")
     logger.info(f"  Gradient accumulation steps = {config.training.gradient_accumulation_steps}")
+    logger.info(f"  Total training epochs = {num_train_epochs}")
+    logger.info(f"  Steps per epoch = {num_update_steps_per_epoch}")
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
@@ -534,6 +553,9 @@ def main():
 
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
+        num_update_step = 0  # Track gradient update steps within each epoch
+        accum_loss_t2i = accum_loss_lm = accum_loss_mmu = accum_masking_rate = 0.0
+        accum_log_steps = 0
         for batch, batch_idx, dataloader_idx in combined_dataloader:
             data_time_m.update(time.time() - end)
 
@@ -586,9 +608,9 @@ def main():
                     _tok = uni_prompting.text_tokenizer
                     print("=== DATASET TEXT TAIL (texts_mmu[0], last 500) ===")
                     print(repr(texts_mmu[0][-500:]))
-                    print("=== PROMPT TAIL (decoded input_ids_mmu, 80 tok before target) ===")
+                    print("=== PROMPT TAIL (decoded input_ids_mmu before target) ===")
                     print(repr(_tok.decode(
-                        input_ids_mmu[0, max(0, first_target - 80):first_target].tolist(),
+                        input_ids_mmu[0, :first_target].tolist(),
                         skip_special_tokens=False,
                     )))
                     print("=== TARGET HEAD (decoded input_ids_mmu, 80 tok from target) ===")
@@ -596,6 +618,11 @@ def main():
                         input_ids_mmu[0, first_target:first_target + 80].tolist(),
                         skip_special_tokens=False,
                     )))
+                    print(
+                        f"=== PROMPT LENGTH: {first_target} | "
+                        f"TARGET LENGTH: {(prompt_masks[0] == 0).sum().item()} | "
+                        f"TOTAL LENGTH: {input_ids_mmu.shape[-1]} ==="
+                    )
                 else:
                     print("WARN: prompt_masks[0] has no target positions (all 1)")
 
@@ -647,6 +674,11 @@ def main():
                 avg_loss_mmu = accelerator.gather(
                     loss_mmu.repeat(config.training.batch_size_mmu)
                 ).mean()
+                accum_loss_t2i += avg_loss_t2i.item()
+                accum_loss_lm += avg_loss_lm.item()
+                accum_loss_mmu += avg_loss_mmu.item()
+                accum_masking_rate += avg_masking_rate.item()
+                accum_log_steps += 1
 
                 loss = (
                     config.training.t2i_coeff * loss_t2i
@@ -674,6 +706,12 @@ def main():
             if accelerator.sync_gradients:
                 batch_time_m.update(time.time() - end)
                 end = time.time()
+                num_update_step += 1  # Increment on actual gradient updates
+                log_denom = max(accum_log_steps, 1)
+                log_loss_t2i = accum_loss_t2i / log_denom
+                log_loss_lm = accum_loss_lm / log_denom
+                log_loss_mmu = accum_loss_mmu / log_denom
+                log_masking_rate = accum_masking_rate / log_denom
 
                 if (global_step + 1) % config.experiment.log_every == 0:
                     samples_per_second_per_gpu = (
@@ -681,30 +719,36 @@ def main():
                         * total_batch_size_per_gpu
                         / batch_time_m.val
                     )
+                    # Calculate epoch with decimal precision based on update steps
+                    epoch_progress = epoch + (num_update_step - 1) / num_update_steps_per_epoch
                     logs = {
-                        "step_loss_t2i": avg_loss_t2i.item(),
-                        "step_loss_mmu_rel_position": avg_loss_mmu.item(),
-                        "step_loss_lm": avg_loss_lm.item(),
+                        "step_loss_t2i": log_loss_t2i,
+                        "step_loss_mmu_rel_position": log_loss_mmu,
+                        "step_loss_lm": log_loss_lm,
                         "lr": lr_scheduler.get_last_lr()[0],
-                        "avg_masking_rate": avg_masking_rate.item(),
+                        "avg_masking_rate": log_masking_rate,
                         "samples/sec/gpu": samples_per_second_per_gpu,
                         "data_time": data_time_m.val,
                         "batch_time": batch_time_m.val,
+                        "epoch": epoch_progress,
                     }
                     accelerator.log(logs, step=global_step + 1)
                     logger.info(
                         f"Step: {global_step + 1} "
-                        f"Loss_t2i: {avg_loss_t2i.item():0.4f} "
-                        f"Loss_rel_position: {avg_loss_mmu.item():0.4f} "
-                        f"Loss_lm: {avg_loss_lm.item():0.4f} "
+                        f"Epoch: {epoch_progress:.2f} "
+                        f"Loss_t2i: {log_loss_t2i:0.4f} "
+                        f"Loss_rel_position: {log_loss_mmu:0.4f} "
+                        f"Loss_lm: {log_loss_lm:0.4f} "
                         f"LR: {lr_scheduler.get_last_lr()[0]:0.6f} "
-                        f"Mask: {avg_masking_rate.item():0.4f} "
+                        f"Mask: {log_masking_rate:0.4f} "
                         f"Samples/sec/gpu: {samples_per_second_per_gpu:0.2f} "
                         f"Data: {data_time_m.val:0.3f}s "
                         f"Batch: {batch_time_m.val:0.3f}s"
                     )
                     batch_time_m.reset()
                     data_time_m.reset()
+                accum_loss_t2i = accum_loss_lm = accum_loss_mmu = accum_masking_rate = 0.0
+                accum_log_steps = 0
 
                 if (global_step + 1) % config.experiment.save_every == 0:
                     save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
@@ -718,17 +762,18 @@ def main():
                     )
                 )
 
+                if need_eval:
+                    validate_rel_position(
+                        model,
+                        vq_model,
+                        uni_prompting,
+                        accelerator,
+                        config,
+                        global_step + 1,
+                        val_rel_position_items,
+                    )
+
                 if accelerator.is_main_process:
-                    if need_eval and val_rel_position_items:
-                        validate_rel_position(
-                            model,
-                            vq_model,
-                            uni_prompting,
-                            accelerator,
-                            config,
-                            global_step + 1,
-                            val_rel_position_items,
-                        )
                     if need_gen:
                         generate_images(
                             model, vq_model, uni_prompting, accelerator, config,
@@ -777,7 +822,12 @@ def validate_rel_position(
     """Run rel_position validation and log accuracy / 4×4 CM / sample predictions to WandB."""
     from parquet.my_dataset import image_transform_squash
 
-    logger.info("Running rel_position validation...")
+    rank = accelerator.process_index
+    world_size = accelerator.num_processes
+    is_main = accelerator.is_main_process
+
+    if is_main:
+        logger.info("Running rel_position validation...")
     model.eval()
 
     resolution = config.dataset.preprocessing.resolution
@@ -790,14 +840,33 @@ def validate_rel_position(
     else:
         weight_dtype = torch.float32
 
-    gt_positions, pred_positions, pred_answers, questions, sample_images = [], [], [], [], []
+    local_results = []
 
     total_samples = len(val_items)
-    print("=" * 70)
-    print(f"RelPosition validation @ step {global_step}  ({total_samples} samples)")
-    print("=" * 70)
+    if is_main:
+        print("=" * 70)
+        print(
+            f"RelPosition validation @ step {global_step}  "
+            f"({total_samples} samples, {world_size} ranks)"
+        )
+        print("=" * 70)
 
-    for item in val_items:
+    local_items = [
+        (sample_idx, item)
+        for sample_idx, item in enumerate(val_items)
+        if sample_idx % world_size == rank
+    ]
+    local_total = len(local_items)
+    iterator = tqdm(
+        local_items,
+        total=local_total,
+        desc=f"RelPosition val rank {rank}",
+        position=rank,
+        leave=True,
+        dynamic_ncols=True,
+    )
+
+    for sample_idx, item in iterator:
         try:
             image = item['image']
             if not isinstance(image, Image.Image):
@@ -860,17 +929,20 @@ def validate_rel_position(
 
             pred_position = extract_position(generated_text)
 
-            gt_positions.append(gt_position)
-            pred_positions.append(pred_position)
-            pred_answers.append(generated_text)
-            questions.append(question)
-            sample_images.append(pil_image)
+            local_results.append({
+                "sample_idx": sample_idx,
+                "question": question,
+                "gt_position": gt_position,
+                "pred_position": pred_position,
+                "pred_answer": generated_text,
+                "image": pil_image,
+            })
 
-            if len(gt_positions) == 1:
+            if len(local_results) == 1:
                 prompt_preview = uni_prompting.text_tokenizer.decode(
                     input_ids[0], skip_special_tokens=False
                 )
-                print("--- Prompt preview (first sample, last 400 chars) ---")
+                print(f"--- Prompt preview (rank {rank}, first local sample, last 400 chars) ---")
                 print(prompt_preview[-400:])
                 print("--- end preview ---")
 
@@ -878,10 +950,11 @@ def validate_rel_position(
             text_preview = generated_text.strip()
             if len(text_preview) > 60:
                 text_preview = text_preview[:60] + "..."
-            idx = len(gt_positions)
+            local_idx = len(local_results)
             pred_disp = pred_position if pred_position is not None else 'N/A'
             print(
-                f"[{idx:3d}/{total_samples}] gt={gt_position:>13}  "
+                f"[rank {rank} {local_idx:3d}/{local_total}] "
+                f"sample={sample_idx:>3}  gt={gt_position:>13}  "
                 f"pred={pred_disp:>13}  {mark}  {text_preview!r}"
             )
             n_new = int(new_tok_ids.numel())
@@ -892,12 +965,32 @@ def validate_rel_position(
             print(f"           raw[{n_new}t, {n_eos} EOS]: {raw_preview!r}")
 
         except Exception as e:
-            logger.warning(f"RelPosition validation error: {e}")
+            logger.warning(f"RelPosition validation error on rank {rank}, index {sample_idx}: {e}")
             continue
 
-    if not gt_positions:
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        all_results = [None for _ in range(world_size)]
+        dist.barrier()
+        dist.all_gather_object(all_results, local_results)
+        results = [item for shard in all_results if shard for item in shard]
+    else:
+        results = local_results
+
+    if not is_main:
         model.train()
         return
+
+    results = sorted(results, key=lambda item: item["sample_idx"])
+
+    if not results:
+        model.train()
+        return
+
+    gt_positions = [item["gt_position"] for item in results]
+    pred_positions = [item["pred_position"] for item in results]
+    pred_answers = [item["pred_answer"] for item in results]
+    questions = [item["question"] for item in results]
+    sample_images = [item["image"] for item in results]
 
     total = len(gt_positions)
     correct = sum(1 for g, p in zip(gt_positions, pred_positions) if g == p and p is not None)

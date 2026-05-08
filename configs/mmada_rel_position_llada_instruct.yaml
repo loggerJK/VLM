@@ -15,6 +15,7 @@ experiment:
     log_grad_norm_every: 100
     resume_from_checkpoint: "latest"
     max_val_rel_position_samples: 100
+    validate_before_train : False # True이면 훈련 시작 전 Validation 수행.
 
 model:
     vq_model:
@@ -50,7 +51,7 @@ dataset:
         persistent_workers: True
 
     preprocessing:
-        max_seq_length: 128
+        max_seq_length: 128 # 이미지 제외, 최대 텍스트 인풋 길이 (prompt + target)
         resolution: 512
         center_crop: False
         random_flip: False
