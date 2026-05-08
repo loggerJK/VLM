@@ -13,10 +13,10 @@
 
 set -euo pipefail
 
+export WANDB_MODE=online
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 source env.sh
 
-export WANDB_MODE=offline
-export CUDA_VISIBLE_DEVICES=0,1,2,3
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
     NUM_PROCESSES=$(awk -F',' '{print NF}' <<< "${CUDA_VISIBLE_DEVICES}")
@@ -28,9 +28,9 @@ fi
 ACCEL_CONFIG=${ACCEL_CONFIG:-accelerate_configs/auto_multi_gpu.yaml}
 CONFIG=${CONFIG:-configs/mmada_counting_llada_instruct.yaml}
 MAX_TRAIN_STEPS=62500
-EVAL_EVERY=5
-SAVE_EVERY=5
-MAX_VAL_COUNTING_SAMPLES=5
+EVAL_EVERY=500
+SAVE_EVERY=500
+MAX_VAL_COUNTING_SAMPLES=100
 OUTPUT_DIR=${OUTPUT_DIR:-}
 LEARNING_RATE=${LEARNING_RATE:-}
 NGPUS=${NUM_PROCESSES}
@@ -58,14 +58,10 @@ echo "  OUTPUT_DIR      : ${OUTPUT_DIR:-<from YAML>}"
 echo "  LEARNING_RATE   : ${LEARNING_RATE:-<from YAML>}"
 echo "========================================"
 
-
-# answer_format="number" 기준: max_seq_length 32로 충분
-# answer_format="sentence" 기준: max_seq_length 64 충분
-
 accelerate launch --config_file "${ACCEL_CONFIG}" \
     --num_processes "${NUM_PROCESSES}" \
     training/train_mmada_counting.py \
-    experiment.name="DEBUG_COUNTING" \
+    experiment.name="MMADA_COUNTING_NUMBER" \
     experiment.resume_from_checkpoint=null \
     config="${CONFIG}" \
     training.gradient_accumulation_steps=${GRAD_ACCUM_STEPS} \
@@ -74,8 +70,9 @@ accelerate launch --config_file "${ACCEL_CONFIG}" \
     experiment.save_every=${SAVE_EVERY} \
     experiment.eval_every=${EVAL_EVERY} \
     experiment.max_val_counting_samples=${MAX_VAL_COUNTING_SAMPLES} \
-    dataset.params.answer_format="sentence" \
-    dataset.preprocessing.max_seq_length=64 \
+    experiment.max_val_counting_samples=${MAX_VAL_COUNTING_SAMPLES} \
+    dataset.params.answer_format="number" \
+    dataset.preprocessing.max_seq_length=32 \
     experiment.validate_before_train=True \
     training.max_train_steps=${MAX_TRAIN_STEPS} \
     "${OVERRIDES[@]}"

@@ -552,6 +552,7 @@ def main():
     logger.info(f"  Total train batch size = {total_batch_size}")
     logger.info(f"  Gradient accumulation steps = {config.training.gradient_accumulation_steps}")
     logger.info(f"  Total training epochs = {num_train_epochs}")
+    logger.info(f"  Steps per epoch = {num_update_steps_per_epoch}")
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
@@ -560,6 +561,8 @@ def main():
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
         num_update_step = 0  # Track gradient update steps within each epoch
+        accum_loss_t2i = accum_loss_lm = accum_loss_mmu = accum_masking_rate = 0.0
+        accum_log_steps = 0
         for batch, batch_idx, dataloader_idx in combined_dataloader:
             data_time_m.update(time.time() - end)
 
@@ -676,6 +679,11 @@ def main():
                 avg_loss_mmu = accelerator.gather(
                     loss_mmu.repeat(config.training.batch_size_mmu)
                 ).mean()
+                accum_loss_t2i += avg_loss_t2i.item()
+                accum_loss_lm += avg_loss_lm.item()
+                accum_loss_mmu += avg_loss_mmu.item()
+                accum_masking_rate += avg_masking_rate.item()
+                accum_log_steps += 1
 
                 loss = (
                     config.training.t2i_coeff * loss_t2i
@@ -704,6 +712,11 @@ def main():
                 batch_time_m.update(time.time() - end)
                 end = time.time()
                 num_update_step += 1  # Increment on actual gradient updates
+                log_denom = max(accum_log_steps, 1)
+                log_loss_t2i = accum_loss_t2i / log_denom
+                log_loss_lm = accum_loss_lm / log_denom
+                log_loss_mmu = accum_loss_mmu / log_denom
+                log_masking_rate = accum_masking_rate / log_denom
 
                 if (global_step + 1) % config.experiment.log_every == 0:
                     samples_per_second_per_gpu = (
@@ -714,11 +727,11 @@ def main():
                     # Calculate epoch with decimal precision based on update steps
                     epoch_progress = epoch + (num_update_step - 1) / num_update_steps_per_epoch
                     logs = {
-                        "step_loss_t2i": avg_loss_t2i.item(),
-                        "step_loss_mmu_counting": avg_loss_mmu.item(),
-                        "step_loss_lm": avg_loss_lm.item(),
+                        "step_loss_t2i": log_loss_t2i,
+                        "step_loss_mmu_counting": log_loss_mmu,
+                        "step_loss_lm": log_loss_lm,
                         "lr": lr_scheduler.get_last_lr()[0],
-                        "avg_masking_rate": avg_masking_rate.item(),
+                        "avg_masking_rate": log_masking_rate,
                         "samples/sec/gpu": samples_per_second_per_gpu,
                         "data_time": data_time_m.val,
                         "batch_time": batch_time_m.val,
@@ -728,17 +741,19 @@ def main():
                     logger.info(
                         f"Step: {global_step + 1} "
                         f"Epoch: {epoch_progress:.2f} "
-                        f"Loss_t2i: {avg_loss_t2i.item():0.4f} "
-                        f"Loss_counting: {avg_loss_mmu.item():0.4f} "
-                        f"Loss_lm: {avg_loss_lm.item():0.4f} "
+                        f"Loss_t2i: {log_loss_t2i:0.4f} "
+                        f"Loss_counting: {log_loss_mmu:0.4f} "
+                        f"Loss_lm: {log_loss_lm:0.4f} "
                         f"LR: {lr_scheduler.get_last_lr()[0]:0.6f} "
-                        f"Mask: {avg_masking_rate.item():0.4f} "
+                        f"Mask: {log_masking_rate:0.4f} "
                         f"Samples/sec/gpu: {samples_per_second_per_gpu:0.2f} "
                         f"Data: {data_time_m.val:0.3f}s "
                         f"Batch: {batch_time_m.val:0.3f}s"
                     )
                     batch_time_m.reset()
                     data_time_m.reset()
+                accum_loss_t2i = accum_loss_lm = accum_loss_mmu = accum_masking_rate = 0.0
+                accum_log_steps = 0
 
                 if (global_step + 1) % config.experiment.save_every == 0:
                     save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
