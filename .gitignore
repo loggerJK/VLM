@@ -1,0 +1,38 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+.env.*
+env.sh
+
+# Experiment logs and local outputs
+wandb/
+output/
+outputs/
+runs/
+logs/
+evaluation_results/
+
+# Training checkpoints and model artifacts
+checkpoint-*/
+**/checkpoint-*/
+mmada-counting-llada-instruct/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# OS/editor files
+.DS_Store
+*.swp
+*.swo
