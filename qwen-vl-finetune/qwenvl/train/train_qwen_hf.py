@@ -28,7 +28,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMoeForConditionalGeneration,
 )
-from qwenvl.data.hf_dataset import HFCountingDataset, HFOCRSyntheticDataset, HFCelebDataset
+from qwenvl.data.hf_dataset import HFCountingDataset, HFOCRSyntheticDataset, HFCelebDataset, HFRelPositionDataset
 from qwenvl.data.data_processor import (
     DataCollatorForSupervisedDataset,
     FlattenedDataCollatorForSupervisedDataset,
@@ -161,8 +161,10 @@ def train(attn_implementation="flash_attention_2"):
         train_dataset = HFOCRSyntheticDataset(processor, data_args)
     elif task == "celeb":
         train_dataset = HFCelebDataset(processor, data_args)
+    elif task == "rel_position":
+        train_dataset = HFRelPositionDataset(processor, data_args)
     else:
-        raise ValueError(f"Unknown task: {task!r}. Must be 'counting', 'ocr', or 'celeb'.")
+        raise ValueError(f"Unknown task: {task!r}. Must be 'counting', 'ocr', 'celeb', or 'rel_position'.")
 
     if data_args.data_flatten:
         data_collator = FlattenedDataCollatorForSupervisedDataset(processor.tokenizer)

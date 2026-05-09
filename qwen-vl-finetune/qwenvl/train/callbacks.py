@@ -126,6 +126,8 @@ class QwenValidationCallback(TrainerCallback):
                 self._validate_ocr(model, step)
             elif self.task == "celeb":
                 self._validate_celeb(model, step)
+            elif self.task == "rel_position":
+                self._validate_rel_position(model, step)
         except Exception as e:
             logger.warning(f"Validation failed at step {step}: {e}")
         finally:
@@ -327,6 +329,111 @@ class QwenValidationCallback(TrainerCallback):
                     data=[[p["gt"], p["pred"], p["exact"]] for p in predictions[:20]],
                 )
                 wandb.log({"val/predictions": table}, step=step)
+        except ImportError:
+            pass
+
+    @torch.no_grad()
+    def _validate_rel_position(self, model, step):
+        from datasets import load_dataset
+
+        ds = load_dataset(
+            "heez/relative-position-new", split="validation", streaming=True
+        )
+
+        pattern = r"(top-left|top-right|bottom-left|bottom-right)"
+
+        correct = 0
+        total = 0
+        predictions = []
+        device = next(model.parameters()).device
+        unwrapped = model.module if hasattr(model, "module") else model
+
+        for sample in ds:
+            if total >= 100:
+                break
+
+            try:
+                pil_image = sample["image"]
+                if pil_image.mode != "RGB":
+                    pil_image = pil_image.convert("RGB")
+            except Exception as e:
+                logger.warning(f"[RelPosition Val] Skipping corrupted sample: {e}")
+                continue
+
+            question = str(sample.get("question", ""))
+            gt_answer = str(sample.get("answer", ""))
+
+            if not question or not gt_answer:
+                continue
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_image},
+                        {"type": "text", "text": question},
+                    ],
+                }
+            ]
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, _ = process_vision_info(messages)
+            inputs = self.processor(
+                text=[text], images=image_inputs, return_tensors="pt"
+            ).to(device)
+
+            output_ids = unwrapped.generate(**inputs, max_new_tokens=50, do_sample=False)
+            generated = output_ids[0][inputs["input_ids"].shape[1]:]
+            pred_text = self.processor.decode(generated, skip_special_tokens=True).strip()
+
+            gt_matches = re.findall(pattern, gt_answer.lower())
+            pred_matches = re.findall(pattern, pred_text.lower())
+
+            if not gt_matches or not pred_matches:
+                is_correct = False
+            elif len(pred_matches) > 1:
+                is_correct = False
+            else:
+                is_correct = gt_matches[0] == pred_matches[0]
+
+            parsed_gt = gt_matches[0] if gt_matches else ""
+            parsed_pred = pred_matches[0] if len(pred_matches) == 1 else ",".join(pred_matches)
+
+            if is_correct:
+                correct += 1
+            total += 1
+
+            print("=" * 50)
+            print(f"[GT]")
+            print(f"{gt_answer} (parsed: {parsed_gt})")
+            print(f"[Prediction]")
+            print(f"{pred_text} (parsed: {parsed_pred})")
+
+            predictions.append({
+                "question": question,
+                "gt": gt_answer,
+                "pred": pred_text,
+                "parsed_gt": parsed_gt,
+                "parsed_pred": parsed_pred,
+                "correct": is_correct,
+            })
+
+        accuracy = correct / total if total > 0 else 0.0
+        logger.info(f"[Step {step}] RelPosition val accuracy: {accuracy:.4f} ({correct}/{total})")
+
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"val/rel_position_accuracy": accuracy, "val/step": step}, step=step)
+                table = wandb.Table(
+                    columns=["question", "gt", "pred", "parsed_gt", "parsed_pred", "correct"],
+                    data=[
+                        [p["question"], p["gt"], p["pred"], p["parsed_gt"], p["parsed_pred"], p["correct"]]
+                        for p in predictions[:20]
+                    ],
+                )
+                wandb.log({"val/rel_position_predictions": table}, step=step)
         except ImportError:
             pass
 
