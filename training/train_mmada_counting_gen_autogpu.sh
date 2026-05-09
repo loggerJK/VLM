@@ -25,6 +25,7 @@ SAVE_EVERY=${SAVE_EVERY:-500}
 MAX_VAL_COUNTING_GEN_SAMPLES=${MAX_VAL_COUNTING_GEN_SAMPLES:-16}
 OUTPUT_DIR=${OUTPUT_DIR:-}
 LEARNING_RATE=${LEARNING_RATE:-}
+MAX_SEQ_LENGTH=${MAX_SEQ_LENGTH:-512}
 NGPUS=${NUM_PROCESSES}
 EFFECTIVE_BATCH_SIZE=${EFFECTIVE_BATCH_SIZE:-64}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
@@ -33,6 +34,7 @@ GRAD_ACCUM_STEPS=$((EFFECTIVE_BATCH_SIZE / (TRAIN_BATCH_SIZE * NGPUS)))
 OVERRIDES=(
     "training.max_train_steps=${MAX_TRAIN_STEPS}"
     "experiment.eval_every=${EVAL_EVERY}"
+    "dataset.preprocessing.max_seq_length=${MAX_SEQ_LENGTH}"
 )
 [ -n "${OUTPUT_DIR}" ]    && OVERRIDES+=("experiment.output_dir=${OUTPUT_DIR}")
 [ -n "${LEARNING_RATE}" ] && OVERRIDES+=("optimizer.params.learning_rate=${LEARNING_RATE}")
@@ -50,6 +52,7 @@ echo "  MAX_VAL_COUNTING_GEN_SAMP. : ${MAX_VAL_COUNTING_GEN_SAMPLES}"
 echo "  EFFECTIVE_BATCH_SIZE       : ${EFFECTIVE_BATCH_SIZE}"
 echo "  TRAIN_BATCH_SIZE (per-GPU) : ${TRAIN_BATCH_SIZE}"
 echo "  GRAD_ACCUM_STEPS           : ${GRAD_ACCUM_STEPS}"
+echo "  MAX_SEQ_LENGTH             : ${MAX_SEQ_LENGTH}"
 echo "  OUTPUT_DIR                 : ${OUTPUT_DIR:-<from YAML>}"
 echo "  LEARNING_RATE              : ${LEARNING_RATE:-<from YAML>}"
 echo "========================================"

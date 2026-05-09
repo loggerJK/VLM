@@ -40,7 +40,9 @@ dataset:
     combined_loader_mode: "max_size_cycle"
     params:
         # T2I-only counting generation: 데이터는 CountingGenDataset 이 자체 로드
-        count_lower_limit: 0   # Lumina parity: count 필터 → descriptions 분할
+        # Current gen rows have count=null, so CountingGenDataset keeps captioned
+        # rows and only applies this range when a numeric count is present.
+        count_lower_limit: 0
         count_upper_limit: 20
         shuffle_buffer_size: 1000
         num_workers: 16
@@ -49,7 +51,7 @@ dataset:
         persistent_workers: True
 
     preprocessing:
-        max_seq_length: 256  # descriptions 는 multi-sentence 가능 → 128 보다 상향
+        max_seq_length: 512  # T2I text prefix budget; matches 512-res MMaDA inference convention
         resolution: 512
         center_crop: False
         random_flip: False

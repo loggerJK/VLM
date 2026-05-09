@@ -623,16 +623,15 @@ class CountingGenDataset(IterableDataset):
                  buffer_size: int = 100):
         super().__init__()
         from datasets import load_dataset as hf_load_dataset
-        ds = hf_load_dataset("heez/pixmo-point-count-gen-und", split="train")
-        print(f"CountingGenDataset: original size {len(ds)}, applying count[{count_lower_limit},{count_upper_limit}] then descriptions filter...")
-
-        # Count range filter first (Lumina parity, train_unified.py:1196-1201).
-        ds = ds.filter(
-            lambda count: count is not None and count_lower_limit <= count <= count_upper_limit,
-            input_columns=["count"],
+        ds = hf_load_dataset(
+            "heez/pixmo-point-count-gen-und",
+            split="train",
             num_proc=32,
         )
-        print(f"CountingGenDataset: after count filter {len(ds)}")
+        print(
+            f"CountingGenDataset: original size {len(ds)}, applying descriptions "
+            f"filter then numeric count[{count_lower_limit},{count_upper_limit}] filter..."
+        )
 
         # Then keep gen subset only — robust to None / list / whitespace / empty list.
         def _has_caption(d):
@@ -645,6 +644,16 @@ class CountingGenDataset(IterableDataset):
         ds = ds.filter(_has_caption, input_columns=['descriptions'], num_proc=32)
         print(f"CountingGenDataset: after descriptions filter {len(ds)}")
 
+        # Generation rows in the current HF train split have count=None; keep them.
+        # If a future schema provides numeric counts for generation rows, preserve
+        # the configured range filter.
+        ds = ds.filter(
+            lambda count: count is None or count_lower_limit <= count <= count_upper_limit,
+            input_columns=["count"],
+            num_proc=32,
+        )
+        print(f"CountingGenDataset: after numeric count filter {len(ds)}")
+
         self.num_samples = len(ds)
         all_indices = list(range(self.num_samples))
         self.indices = all_indices[rank::world_size]
@@ -656,7 +665,7 @@ class CountingGenDataset(IterableDataset):
         self.buffer_size = buffer_size
 
         print(f"[CountingGenDataset] gen-subset size: {self.num_samples} "
-              f"(after count[{count_lower_limit},{count_upper_limit}] + descriptions filter); "
+              f"(after descriptions + numeric count[{count_lower_limit},{count_upper_limit}] filter); "
               f"rank={rank}/{world_size} → local indices {len(self.indices)}")
 
     def __iter__(self):

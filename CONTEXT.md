@@ -360,9 +360,10 @@ Lumina-DiMOO `task=counting, mode=gen` 학습/평가 로직을 MMaDA 에 추가 
 #### 1. `parquet/my_dataset.py` — `CountingGenDataset` 추가
 
 - `CountingDataset` (und) 의 sharding/buffer/repeat 스켈레톤 mirror, chat_template 로직 제거.
-- HF 필터 순서 (Lumina `train_unified.py:1196-1204` parity): **count 범위 필터 → descriptions 분할**.
-  - count 필터: `count_lower_limit <= count <= count_upper_limit` (기본 0/20).
-  - descriptions 분할: gen 모드는 `descriptions` 가 non-empty 인 row 만 (CountingDataset 의 반대).
+- HF 필터 순서 (실측 schema 반영): **descriptions 분할 → numeric count 범위 필터**.
+  - 현재 HF train split 의 generation rows 는 `descriptions` 가 non-empty 이지만 `count=None`.
+  - gen 모드는 `descriptions` 가 non-empty 인 row 만 유지 (CountingDataset 의 반대).
+  - `count` 가 숫자로 존재하는 future schema 에서만 `count_lower_limit <= count <= count_upper_limit` 적용.
 - robust 필터 헬퍼 `_has_caption(d)`: `None` / `""` / `"   "` (whitespace) / `[]` / `["..."]` / `"..."` 모두 처리.
 - `__iter__` 가 `{'images': squashed_tensor, 'input_ids': caption_string}` yield → `Text2ImageDataset` collate 와 동일 shape, 기존 T2I 슬롯 그대로 소비 가능.
 - `image_transform_squash(resolution=512)` 사용 — counting (und/gen) 컨벤션 일관성 (Lumina gen 의 center-crop 과 다르지만 의도적 선택).
@@ -418,7 +419,7 @@ class T2ITrainStepWrapper(torch.nn.Module):
 | `guidance_scale` | 4 (Lumina value) |
 | `generation_timesteps` | 64 (Lumina value) |
 | `cond_dropout_prob` | 0.1 (Stage2 baseline) |
-| `max_seq_length` | 256 (descriptions multi-sentence 대응; counting und 의 128 보다 상향) |
+| `max_seq_length` | 512 (T2I text prefix budget; 512-res MMaDA inference convention 과 맞춤) |
 | `resolution` | 512 |
 | `max_val_counting_gen_samples` | 16 |
 | `learning_rate` / `max_train_steps` | 2e-5 / 50000 |
@@ -428,7 +429,7 @@ class T2ITrainStepWrapper(torch.nn.Module):
 
 `training/train_mmada_counting_gen_{1gpu,8gpu,autogpu,autogpu_debug}.sh` — counting wrapper 4종 mirror, target script + CONFIG 치환.
 - 모두 `training.batch_size_lm=0`, `training.batch_size_mmu=0` 명시 (config 실수 방지).
-- `_autogpu*.sh` : `training.batch_size_t2i=${TRAIN_BATCH_SIZE}` (counting 의 `batch_size_mmu` override 와 대응).
+- `_autogpu*.sh` : `training.batch_size_t2i=${TRAIN_BATCH_SIZE}` (counting 의 `batch_size_mmu` override 와 대응), `dataset.preprocessing.max_seq_length=${MAX_SEQ_LENGTH:-512}` 명시.
 - `_autogpu_debug.sh` : `MAX_TRAIN_STEPS=10 EVAL_EVERY=5 SAVE_EVERY=10 MAX_VAL_COUNTING_GEN_SAMPLES=4 experiment.validate_before_train=True`.
 
 ### 실행 방법
@@ -463,7 +464,7 @@ bash training/train_mmada_counting_gen_autogpu.sh
 
 #### Fix 1 (counting_gen, CRITICAL): `t2i_generate(resolution=...)` mismatch
 
-`models/modeling_mmada.py:118-211` 의 `t2i_generate` 의 `resolution` 인자는 이름과 달리 실제로는 **CFG text-prefix 길이** (`uncond_prefix = uncond_input_ids[:, :resolution+1]`, L153). 기본값 512 는 demo / stage3-cot config 의 `max_seq_length=512` 와 우연히 맞았던 값. 신규 counting-gen config 의 `max_seq_length=256` 으로 호출 시 default 512 면 uncond_prefix 가 text 영역(257)을 넘어 image 영역 일부를 포함 → cond/uncond 의 image 영역 차이 발생 → CFG 의미 손상.
+`models/modeling_mmada.py:118-211` 의 `t2i_generate` 의 `resolution` 인자는 이름과 달리 실제로는 **CFG text-prefix 길이** (`uncond_prefix = uncond_input_ids[:, :resolution+1]`, L153). 기본값 512 는 demo / stage3-cot config 의 `max_seq_length=512` 와 우연히 맞았던 값. 초기 counting-gen config 처럼 `max_seq_length=256` 으로 호출 시 default 512 면 uncond_prefix 가 text 영역(257)을 넘어 image 영역 일부를 포함 → cond/uncond 의 image 영역 차이 발생 → CFG 의미 손상.
 
 수정: `validate_counting_gen` 의 `t2i_generate` 호출에 `resolution=config.dataset.preprocessing.max_seq_length` 명시. 학습 시 `generate_images` 호출 자체를 제거했으므로 다른 호출 사이트는 없음. 추후 sanity 함수 추가 시에도 동일 인자 전달 필수.
 
@@ -485,4 +486,29 @@ torch 빌드/버전에 따라 PIL 객체 pickle 이 깨질 수 있음. validatio
 
 #### Fix 6 (counting_gen): step-0 sanity 의 이미지 영역만 카운트
 
-학습 loss 의 slicing 은 공식 `[:, msl+1:]` 패턴 그대로 (soi/eoi 가 ignore_id 라 CE 에서 자연 제거). 단 debug print 의 "masked image tokens" 값은 순수 이미지 토큰만 세도록 `[:, msl+2:-1]` slice 사용 — text label 의 -100 또는 soi/eoi 가 섞이지 않게.
+학습 loss 의 slicing 은 공식 `[:, msl+1:]` 패턴 그대로 유지. `UniversalPrompting` 내부 `max_text_len = config.max_seq_length + 1` 이므로 `msl+1` 은 `<|soi|>` 위치이고, 기존 stage2 T2I 경로와 동일하게 `<|soi|>`, masked image tokens, `<|eoi|>` 가 CE slice 에 포함된다. 단 debug print 의 "masked image tokens" 값은 순수 이미지 토큰만 세도록 `[:, msl+2:-1]` slice 사용 — text label 이나 soi/eoi 가 섞이지 않게.
+
+#### Fix 7 (counting_gen, CRITICAL): train generation subset 0개 문제 해결
+
+실제 실행 (`training/train_mmada_counting_gen_autogpu_debug.sh`, 2026-05-09) 에서 HF cache 생성 후:
+
+```text
+CountingGenDataset: after count filter 225914
+CountingGenDataset: after descriptions filter 0
+```
+
+원인: `train` split 은 앞쪽 225,914개 understanding rows 가 `count=0..20`, `descriptions=None` 이고, 뒤쪽 65,512개 generation rows 가 `descriptions=[caption]`, `count=None`, `question=None`, `answer_count=None` 구조. 기존 구현이 count filter 를 먼저 적용해 generation rows 를 전부 삭제.
+
+수정: `CountingGenDataset` 필터 순서를 `descriptions non-empty` 먼저로 변경하고, numeric `count` 가 있을 때만 count range filter 적용. 현재 schema 에서는 gen subset 65,512개가 유지되어야 함.
+
+#### Fix 8 (counting_gen): `max_seq_length` 256 → 512 조정
+
+`max_seq_length` 는 caption 단독 길이가 아니라 `UniversalPrompting` 의 T2I text prefix budget (`<|t2i|>` + BOS + caption tokens + EOS) 이다. config 256 은 내부 prefix budget 257, 실질 caption budget 약 254 tokens. train gen 65,512개 caption 을 Arrow cache 에서 직접 스캔한 결과:
+
+```text
+prompt_prefix_tokens p50=103, p90=131, p95=146, p99=182, p99.9=226, max=521
+prefix > 257: 25
+prefix > 513: 7
+```
+
+256 도 대부분은 커버하지만, 512-res MMaDA inference convention 과 positional distribution 을 맞추고 truncation 을 줄이기 위해 기본 config 와 `_autogpu{,_debug}.sh` 의 `MAX_SEQ_LENGTH` 기본값을 512 로 변경. 예상 sequence 길이: `1283 -> 1539` (`513 text prefix + <|soi|> + 1024 image + <|eoi|>`).
