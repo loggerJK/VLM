@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Work Log Convention
+
+저장소 루트의 `CONTEXT.md`에 작업 내역을 누적 기록합니다. **모든 작업이 끝날 때마다** `CONTEXT.md`의 맨 위에 새 항목(날짜 + 목표 + 변경 파일 + 실행 방법 + 검증 메모)을 추가하세요. 기존 항목은 절대 삭제하지 말고 위에 쌓는 방식으로 유지합니다.
+
 ## Project Overview
 
 Qwen3-VL is Alibaba's vision-language model repository containing fine-tuning frameworks, utility packages, evaluation benchmarks, and demo notebooks for Qwen2-VL, Qwen2.5-VL, and Qwen3-VL model families. Models range from 2B to 235B parameters.
