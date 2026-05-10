@@ -192,6 +192,10 @@ def main():
                         noise_schedule=mask_schedule,
                         noise_type=config.training.get("noise_type", "mask"),
                         seq_len=config.model.mmada.num_vq_tokens,
+                        # CRITICAL: t2i_generate's `resolution` arg is actually the CFG
+                        # text-prefix length; default 512 corrupts CFG when our config
+                        # uses max_seq_length=128 (rel_position).
+                        resolution=config.dataset.preprocessing.max_seq_length,
                         uni_prompting=uni_prompting,
                         config=config,
                         generator=generator,

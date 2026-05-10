@@ -2,7 +2,7 @@
 # PixMo Counting Evaluation — Multi-GPU (MMaDA)
 #
 # Run from the repository root:
-#   bash evaluation/counting/evaluate_pixmo_multigpu.sh
+#   bash evaluation/counting/understanding/evaluate_pixmo_multigpu.sh
 #
 # Sweeps a list of checkpoint subdirectories under ${CHECKPOINT_BASE}.
 # Expected checkpoint layout (from train_mmada_counting.py):
@@ -10,24 +10,30 @@
 #
 # Override defaults via env vars, e.g.:
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 \
-#   CHECKPOINT_BASE=output/mmada-counting-llada-instruct \
+#   CHECKPOINT_BASE=/mnt/data1/dvlm/mmada/checkpoints/mmada-counting-gen-llada-instruct \
 #   OUTPUT_BASE=evaluation_results/counting \
-#   bash evaluation/counting/evaluate_pixmo_multigpu.sh
+#   bash evaluation/counting/understanding/evaluate_pixmo_multigpu.sh
 
 set -euo pipefail
 
+# 현재 PATH를 PYTHONPATH에 추가하여, repository의 루트 디렉토리가 패키지로 인식되도록 함
+export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}$(pwd)"
+
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-6,7}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
-export MASTER_PORT=${MASTER_PORT:-25001}
+export MASTER_PORT=${MASTER_PORT:-25010}
 ngpus=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F',' '{print NF}')
+echo "Using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (ngpus=${ngpus})"
+
+base_dir="/mnt/cvlab22_data1/dvlm"
 
 BASE_MODEL_PATH=${BASE_MODEL_PATH:-Gen-Verse/MMaDA-8B-MixCoT}
 VQ_MODEL_PATH=${VQ_MODEL_PATH:-showlab/magvitv2}
-CHECKPOINT_BASE=${CHECKPOINT_BASE:-output/mmada-counting-llada-instruct}
-OUTPUT_BASE=${OUTPUT_BASE:-evaluation_results/counting}
+CHECKPOINT_BASE=${CHECKPOINT_BASE:-${base_dir}/mmada/checkpoints/mmada-counting-gen-llada-instruct}
+OUTPUT_BASE=${OUTPUT_BASE:-${base_dir}/mmada/counting/understanding}
 RESOLUTION=${RESOLUTION:-512}
-MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-20}
+MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-5}
 SEED=${SEED:-42}
 USE_WANDB=${USE_WANDB:-0}
 WANDB_PROJECT=${WANDB_PROJECT:-mmada-counting-eval}
@@ -63,7 +69,7 @@ run_eval() {
     torchrun --nproc_per_node=${ngpus} \
         --rdzv_backend=c10d \
         --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-        evaluation/counting/evaluate_pixmo_multigpu.py \
+        evaluation/counting/understanding/evaluate_pixmo_multigpu.py \
         --model_path "${model_path}" \
         --vq_model_path "${VQ_MODEL_PATH}" \
         --output_dir "${out_dir}" \
@@ -88,9 +94,35 @@ run_eval "${BASE_MODEL_PATH}" "${OUTPUT_BASE}/baseline" "baseline"
 # Resolved output dir     : ${OUTPUT_BASE}/${ckpt}
 
 ckpt_list=(
-    # "checkpoint-1000"
-    # "checkpoint-2000"
-    # "checkpoint-5000"
+    "checkpoint-500"
+    "checkpoint-1000"
+    "checkpoint-1500"
+    "checkpoint-2000"
+    "checkpoint-2500"
+    "checkpoint-3000"
+    "checkpoint-3500"
+    "checkpoint-4000"
+    "checkpoint-4500"
+    "checkpoint-5000"
+    "checkpoint-5500"
+    "checkpoint-6000"
+    "checkpoint-6500"
+    "checkpoint-7000"
+    "checkpoint-7500"
+    "checkpoint-8000"
+    "checkpoint-8500"
+    "checkpoint-9000"
+    "checkpoint-9500"
+    "checkpoint-10000"
+    "checkpoint-10500"
+    "checkpoint-11000"
+    "checkpoint-11500"
+    "checkpoint-12000"
+    "checkpoint-12500"
+    "checkpoint-13000"
+    "checkpoint-13500"
+    "checkpoint-14000"
+    "checkpoint-14500"
 )
 
 for ckpt in "${ckpt_list[@]}"; do

@@ -512,3 +512,130 @@ prefix > 513: 7
 ```
 
 256 도 대부분은 커버하지만, 512-res MMaDA inference convention 과 positional distribution 을 맞추고 truncation 을 줄이기 위해 기본 config 와 `_autogpu{,_debug}.sh` 의 `MAX_SEQ_LENGTH` 기본값을 512 로 변경. 예상 sequence 길이: `1283 -> 1539` (`513 text prefix + <|soi|> + 1024 image + <|eoi|>`).
+
+---
+
+## RelPosition-Gen 이식 (T2I, 2026-05-09)
+
+### Goal
+
+Lumina-DiMOO `task=rel_position, mode=gen` 학습/평가 로직을 MMaDA 에 추가 이식. Counting-Gen 패턴을 그대로 mirror — Counting-Gen 의 모든 design decision (T2I-only, T2ITrainStepWrapper, t2i_generate(resolution=msl) 명시, PIL→PNG bytes gather, validate_before_train) 을 동일 적용.
+
+- 데이터셋: `heez/relative-position-new` (HF Hub) — train 199400 / validation 100 / test 500
+- 베이스 모델: `Gen-Verse/MMaDA-8B-MixCoT`
+- 베이스 스크립트: `train_mmada_counting_gen.py`
+- 메트릭: 자동 평가기 미부착 — wandb image table (caption / gt_position / gt_image / gen_image) 시각 로깅만 (Lumina parity)
+
+### 데이터셋 caption 결정 (가장 중요한 design decision)
+
+`heez/relative-position-new` 는 별도 caption 컬럼이 없지만, Lumina (`/mnt/data1/jiwon/Lumina-DiMOO/train/train_unified.py:1093-1099`) 가 `answer` 컬럼을 그대로 `descriptions` 로 매핑해 T2I caption 으로 쓰는 패턴을 그대로 따른다:
+
+```python
+train_gen_ds = train_ds.map(
+    lambda answer: {'descriptions': answer},
+    input_columns=['answer'], num_proc=64,
+)
+```
+
+`answer` 는 `"The tow truck appears to the top-right of the garter snake."` 류의 단문장. dataset sanity 검증으로 그대로 caption 으로 들어가는 것 확인.
+
+### 작업 내역
+
+#### 1. `parquet/my_dataset.py` — `RelPositionGenDataset` 추가
+
+- `CountingGenDataset` 의 sharding/buffer/repeat skeleton mirror
+- count 필터 + descriptions 분할 로직 **삭제** (rel_position dataset 에 해당 컬럼 없음 — Lumina L1084-1089 도 주석 처리됨)
+- `__iter__` 에서 caption = `item['answer']` (Lumina parity). None / list / 빈 문자열 / whitespace 모두 inline check 로 방어 (CountingGenDataset 의 `_has_caption` local helper 패턴 복제)
+- `image_transform_squash(resolution=512)` — counting (und/gen) 컨벤션과 일관
+- yield shape: `{'images': tensor, 'input_ids': caption_string}` — `Text2ImageDataset` collate 와 동일 → 기존 T2I 슬롯 그대로 소비
+- `self.num_samples = len(ds) = 199400` (Lumina L1079 parity 확인)
+
+#### 2. `parquet/__init__.py` — `RelPositionGenDataset` export
+
+#### 3. `training/train_mmada_rel_position_gen.py` — 신규 학습 스크립트
+
+`train_mmada_counting_gen.py` 전체 복사 후:
+
+- import: `CountingGenDataset` → `RelPositionGenDataset`
+- dataset 인스턴스: count 인자 제거
+- val 로드: `heez/pixmo-point-count-gen-und[val_gen]` → `heez/relative-position-new[validation]`
+- val sample 제한 키: `max_val_counting_gen_samples` → `max_val_rel_position_gen_samples`
+- `validate_counting_gen()` → `validate_rel_position_gen()`:
+  - caption 소스 = `item['answer']`
+  - GT 라벨 = `gt_position = str(item.get('position', ''))` (counting 의 `gt_count` int 자리에 들어감)
+  - wandb table column: `gt_count` → `gt_position`
+  - wandb log key: `counting_gen/val_images` → `rel_position_gen/val_images`
+- `T2ITrainStepWrapper` / T2I-only assert / `t2i_generate(resolution=msl)` / PNG bytes gather / step-0 sanity slicing / `validate_before_train` 모두 그대로 유지
+
+#### 4. `configs/mmada_rel_position_gen_llada_instruct.yaml` — 훈련 설정
+
+| 항목 | 값 |
+|---|---|
+| `pretrained_model_path` | `Gen-Verse/MMaDA-8B-MixCoT` |
+| `gen_type` / `und_type` | `"rel_position_gen"` / `"rel_position"` (origin 명시) |
+| `batch_size_t2i` / `batch_size_lm` / `batch_size_mmu` | 1 / 0 / 0 |
+| `t2i_coeff` / `lm_coeff` / `mmu_coeff` | 1.0 / 0.0 / 0.0 |
+| `guidance_scale` | 4 (Lumina value) |
+| `generation_timesteps` | 64 (Lumina value) |
+| `cond_dropout_prob` | 0.1 |
+| `max_seq_length` | **128** (사용자 지정값 — answer 가 단문장. `t2i_generate(resolution=128)` 과 반드시 일치) |
+| `resolution` | 512 |
+| `max_val_rel_position_gen_samples` | 16 |
+| `learning_rate` / `max_train_steps` | 2e-5 / 50000 |
+| LoRA rank | 128 |
+
+#### 5. Wrapper sh 4종
+
+`training/train_mmada_rel_position_gen_{1gpu,8gpu,autogpu,autogpu_debug}.sh` — counting_gen wrapper 4종 mirror, target script + CONFIG + env var (`MAX_VAL_REL_POSITION_GEN_SAMPLES`) + echo 라벨 치환. `batch_size_lm=0` / `batch_size_mmu=0` 명시 유지.
+
+#### 6. `evaluation/rel_position/generation/` — geneval inference 정리
+
+기존 `01_geneval_inference_multigpu.sh` 의 결함 3건 수정:
+
+- L24 `PROMPT_FILE`: `"/mnt/${dirname }/..."` 의 trailing space 제거
+- L25 `CONFIG`: `mmada_counting_llada_instruct.yaml` → `mmada_rel_position_gen_llada_instruct.yaml`
+- L18 hardcoded venv path → optional `VENV` env var 분기
+
+`inference_geneval_t2i_multigpu.py`: counting 쪽 symlink 제거 후 **실제 파일 복사**. 사유: rel_position eval 에서 logging/metadata/prompt 분기 가능성, counting 쪽 active 작업과 의도치 않은 coupling 회피, git symlink 환경 의존성 제거.
+
+### 실행 방법
+
+```bash
+# 1 GPU smoke
+bash training/train_mmada_rel_position_gen_1gpu.sh
+
+# auto-detect (debug, 10 step + validate_before_train + EVAL_EVERY=5)
+bash training/train_mmada_rel_position_gen_autogpu_debug.sh
+
+# 8 GPU DeepSpeed
+bash training/train_mmada_rel_position_gen_8gpu.sh
+
+# auto-detect 정식 학습
+bash training/train_mmada_rel_position_gen_autogpu.sh
+
+# Geneval inference (수정된 sh)
+CUDA_VISIBLE_DEVICES=0,1 bash evaluation/rel_position/generation/01_geneval_inference_multigpu.sh
+```
+
+### 파일 목록
+
+| 파일 | 상태 |
+|---|---|
+| `parquet/my_dataset.py` | 수정 (`RelPositionGenDataset` 추가) |
+| `parquet/__init__.py` | 수정 (export 추가) |
+| `training/train_mmada_rel_position_gen.py` | 신규 (~865 lines) |
+| `configs/mmada_rel_position_gen_llada_instruct.yaml` | 신규 |
+| `training/train_mmada_rel_position_gen_{1gpu,8gpu,autogpu,autogpu_debug}.sh` | 신규 4종 |
+| `evaluation/rel_position/generation/01_geneval_inference_multigpu.sh` | 수정 (3건 결함) |
+| `evaluation/rel_position/generation/inference_geneval_t2i_multigpu.py` | 수정 (symlink → 실제 파일 복사) |
+
+### Fix Log
+
+본 이식은 Counting-Gen 의 모든 design fix (Fix 1~6) 가 그대로 적용된 base 를 mirror 했으므로 별도 추가 fix 없음:
+
+- Counting-Gen Fix 1 (`t2i_generate(resolution=msl)` 명시, CFG text-prefix 길이 mismatch 방지) — `validate_rel_position_gen` 에 동일 적용
+- Counting-Gen Fix 2 (`T2ITrainStepWrapper` device-safe 인라인 T2I CE) — wrapper 정의 그대로 복사
+- Counting-Gen Fix 3 (caption 타입 다양성 robust 처리) — `answer` 에도 동일 inline check 적용
+- Counting-Gen Fix 4 (PIL → PNG bytes → `dist.all_gather_object`) — 동일 적용
+- Counting-Gen Fix 5 (validation gate barrier rank-symmetric) — 동일
+- Counting-Gen Fix 6 (step-0 sanity 이미지 영역만 카운트) — 동일 slicing

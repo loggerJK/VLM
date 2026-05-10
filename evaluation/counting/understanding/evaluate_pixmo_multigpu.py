@@ -121,6 +121,13 @@ def append_jsonl(jsonl_path: str, record: dict):
         f.flush()
 
 
+def disable_peft_tp_sharding():
+    import peft.utils.save_and_load as peft_save_and_load
+
+    # torchrun/init_process_group 상태에서 peft 0.19.1이
+    # transformers.integrations.tensor_parallel 을 import하다가 죽는 경로 차단
+    peft_save_and_load._maybe_shard_state_dict_for_tp = lambda *args, **kwargs: None
+
 # ---------------------------------------------------------------------------
 
 def main():
@@ -140,6 +147,8 @@ def main():
                         help="Optional PEFT LoRA adapter dir. If set, base model "
                              "is loaded from --model_path then adapter is merged in.")
     args = parser.parse_args()
+
+    disable_peft_tp_sharding()
 
     # ------------------------------------------------------------------
     # Distributed setup
@@ -212,7 +221,9 @@ def main():
     if args.lora_path:
         from peft import PeftModel
         if rank == 0:
+            print(f"================================")
             print(f"Loading LoRA adapter from {args.lora_path} …")
+            print(f"================================")
         model = PeftModel.from_pretrained(model, args.lora_path)
         model = model.merge_and_unload()
     model = model.eval()
@@ -298,6 +309,12 @@ def main():
                 output_ids[:, prompt_len:], skip_special_tokens=True
             )[0]
             pred_num = extract_number_fixed(pred_text)
+
+            # 결과 Print
+            if gt_num == pred_num:
+                print(f"[Rank {rank}] Item {i}  GT: {gt_num}  Pred: {pred_num}  Text: {pred_text!r}  ✅")
+            else:
+                print(f"[Rank {rank}] Item {i}  GT: {gt_num}  Pred: {pred_num}  Text: {pred_text!r} ❌")
 
             append_jsonl(jsonl_path, {
                 "index": i,
