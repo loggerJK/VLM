@@ -1,5 +1,7 @@
 .env
 env.sh
+.venv
+.uv-cache
 wandb
 __pycache__
 .vscode

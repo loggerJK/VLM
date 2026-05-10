@@ -566,15 +566,26 @@ def build_task_dataset_meta(task, mode, hf_dataset_path=None):
             }
 
     elif task == "rel_position":
-        if mode != "und":
-            raise ValueError("rel_position currently supports understanding mode only; use --mode und.")
-        dataset_meta["rel_position_und"] = {
-            "dataset_names": ["rel_position"],
-            "image_transform_args": dict(UND_IMAGE_ARGS),
-            "is_mandatory": True,
-            "num_used_data": [-1],
-            "weight": 1,
-        }
+        if mode == "und":
+            dataset_meta["rel_position_und"] = {
+                "dataset_names": ["rel_position"],
+                "image_transform_args": dict(UND_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+        elif mode == "gen":
+            dataset_meta["rel_position_gen"] = {
+                "dataset_names": ["rel_position"],
+                "image_transform_args": dict(GEN_IMAGE_ARGS),
+                "is_mandatory": True,
+                "num_used_data": [-1],
+                "weight": 1,
+            }
+        else:
+            raise ValueError(
+                f"rel_position supports 'und' or 'gen' mode only; got {mode!r}."
+            )
 
     else:
         raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, ocr_synthetic, celeb, or rel_position.")
@@ -621,7 +632,7 @@ def _load_validation_dataset(task, mode, hf_dataset_path=None, num_samples=100):
         return ds
 
     elif task == "rel_position":
-        if mode != 'und':
+        if mode not in ("und", "gen"):
             return None
         ds = hf_load_dataset("heez/relative-position-new", split="validation")
         n = min(num_samples, len(ds))
@@ -657,6 +668,8 @@ def _setup_val_gen_prompts(val_ds, task, num_prompts=5):
             persons = ["Heidi", "Samuel", "Elizabeth", "Benjamin", "Gabriel", "Julian"]
             prompts = [f"Generate an image of {p}." for p in persons for _ in range(2)]
             return prompts
+        elif task == "rel_position":
+            caption = item.get("answer", "")
         else:
             caption = "A beautiful landscape photograph."
         prompts.append(caption)

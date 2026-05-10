@@ -8,7 +8,8 @@ from .hf_dataset import (
     HFCountingUndDataset, HFCountingGenDataset,
     HFOCRUndDataset, HFOCRGenDataset,
     HFSyntheticOCRUndDataset, HFSyntheticOCRGenDataset,
-    HFCelebUndDataset, HFRelPositionUndDataset,
+    HFCelebUndDataset,
+    HFRelPositionUndDataset, HFRelPositionGenDataset,
 )
 
 
@@ -24,6 +25,7 @@ DATASET_REGISTRY = {
     'ocr_synthetic_gen': HFSyntheticOCRGenDataset,
     'celeb_und': HFCelebUndDataset,
     'rel_position_und': HFRelPositionUndDataset,
+    'rel_position_gen': HFRelPositionGenDataset,
 }
 
 
@@ -73,6 +75,9 @@ DATASET_INFO = {
         'celeb': {'data_dir': ''},
     },
     'rel_position_und': {
+        'rel_position': {'data_dir': ''},
+    },
+    'rel_position_gen': {
         'rel_position': {'data_dir': ''},
     },
 }
