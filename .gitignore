@@ -1,4 +1,5 @@
 .env
+env.sh
 wandb
 __pycache__
 .vscode
@@ -11,3 +12,5 @@ tests
 gradio.sh
 data_example
 checkpoints
+models/
+*_results.txt

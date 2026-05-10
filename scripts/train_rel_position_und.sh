@@ -1,32 +1,22 @@
 #!/bin/bash
-# OCR understanding training — 1 GPU NO_SHARD + LoRA (rank 128)
-# Dataset: Jiwon-Kang/OCR-Synthetic-Rendered-200K
-#
-# LoRA reduces trainable params to ~0.7%, so 1x 48GB GPU fits without CPU offload.
-# To change settings, edit the variables below directly.
+# Relative-position understanding training with LoRA.
+# Dataset: heez/relative-position-new
 
 set -euo pipefail
-# source ./.env
 source /data/mm-llm-backbone_890/personal/sirius/audio_ablation/env.sh
 conda activate bagel
 
-# Using HF_HOME
-echo "HF_HOME is set to: ${HF_HOME}"
-echo "HF_EVALUATE_CACHE is set to: ${HF_EVALUATE_CACHE}"
-echo "HF_MODULES_CACHE is set to: ${HF_MODULES_CACHE}"
-
 # ============================================================
-# Settings — edit here
+# Settings - edit here
 # ============================================================
-CUDA=0
-MASTER_PORT=29601
+CUDA="0"
+MASTER_PORT=${MASTER_PORT:-29602}
 LR=2e-5
 TOTAL_STEPS=50000
-SAVE_EVERY=2000
-EXP_NAME=ocr_und_lora_1gpu
-HF_DATASET_PATH=Jiwon-Kang/OCR-Synthetic-Rendered-200K
+SAVE_EVERY=100
+EXP_NAME=lora128_rel_position_und
 EFFECTIVE_BATCH=128
-NGPUS=1
+NGPUS=$(echo $CUDA | awk -F',' '{print NF}')
 GRAD_ACCUM=$((EFFECTIVE_BATCH / NGPUS))
 
 # Resume (leave empty to train from scratch)
@@ -39,7 +29,7 @@ WANDB_RUN_ID=""
 # ============================================================
 export CUDA_VISIBLE_DEVICES=${CUDA}
 export PYTHONNOUSERSITE=1
-export PYTHONPATH=$(pwd):${PYTHONPATH:-}
+export PYTHONPATH=/mnt/data1/jiwon/bagel_train:${PYTHONPATH:-}
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 RESULTS_DIR=./results/${EXP_NAME}
@@ -52,24 +42,22 @@ RESUME_ARGS=""
 [ -n "${WANDB_RUN_ID}" ]   && RESUME_ARGS="${RESUME_ARGS} --wandb_runid ${WANDB_RUN_ID} --wandb_resume must"
 
 echo "============================================================"
-echo " BAGEL — ocr und + LoRA (1 GPU)"
+echo " BAGEL - rel_position und + LoRA (${NGPUS} GPUs)"
 echo "  CUDA=${CUDA}  LR=${LR}  Steps=${TOTAL_STEPS}"
 echo "  Ckpt: ${CHECKPOINT_DIR}"
 echo "============================================================"
 
 torchrun \
-    --nproc_per_node=1 \
+    --nproc_per_node=${NGPUS} \
     --master_port=${MASTER_PORT} \
     ./train/pretrain_unified_navit.py \
     --model_path ./models/ \
     --finetune_from_hf True \
     --layer_module Qwen2MoTDecoderLayer \
-    --use_flex False \
-    --max_latent_size 64 \
+    --use_flex True \
     --sharding_strategy NO_SHARD \
     --num_shard 1 --num_replicate 1 \
-    --task ocr --mode und \
-    --hf_dataset_path "${HF_DATASET_PATH}" \
+    --task rel_position --mode und \
     --visual_gen False \
     --freeze_vit True \
     --use_lora True \
@@ -79,18 +67,18 @@ torchrun \
     --lora_target_modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
     --num_workers 4 \
     --expected_num_tokens 2048 \
-    --max_num_tokens 4096 \
-    --max_num_tokens_per_sample 4096 \
+    --max_num_tokens 8192 \
+    --max_num_tokens_per_sample 8192 \
     --results_dir "${RESULTS_DIR}" \
     --checkpoint_dir "${CHECKPOINT_DIR}" \
-    --wandb_project bagel \
+    --wandb_project bagel-position \
     --wandb_name "${EXP_NAME}" \
+    --wandb_offline False \
     --total_steps ${TOTAL_STEPS} \
     --save_every ${SAVE_EVERY} \
-    --log_every 10 \
+    --log_every 1 \
     --lr ${LR} \
-    --validation_interval 500 \
-    --eval_everything \
+    --validation_interval 100 \
     --eval_before_training \
     --gradient_accumulation_steps ${GRAD_ACCUM} \
     ${RESUME_ARGS}

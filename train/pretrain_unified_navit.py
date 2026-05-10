@@ -4,6 +4,7 @@
 import functools
 import gc
 import os
+import re
 import wandb
 import yaml
 import bitsandbytes as bnb
@@ -185,7 +186,8 @@ class DataArguments:
         default=None,
         metadata={
             "help": "Task type for multi-task training. When set, overrides dataset_config_file. "
-                    "Choices: counting, ocr, ocr_synthetic. Leave None to use dataset_config_file."
+                    "Choices: counting, ocr, ocr_synthetic, celeb, rel_position. "
+                    "Leave None to use dataset_config_file."
         }
     )
     mode: str = field(
@@ -563,8 +565,19 @@ def build_task_dataset_meta(task, mode, hf_dataset_path=None):
                 "weight": 1,
             }
 
+    elif task == "rel_position":
+        if mode != "und":
+            raise ValueError("rel_position currently supports understanding mode only; use --mode und.")
+        dataset_meta["rel_position_und"] = {
+            "dataset_names": ["rel_position"],
+            "image_transform_args": dict(UND_IMAGE_ARGS),
+            "is_mandatory": True,
+            "num_used_data": [-1],
+            "weight": 1,
+        }
+
     else:
-        raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, ocr_synthetic, or celeb.")
+        raise ValueError(f"Unknown task: {task!r}. Expected counting, ocr, ocr_synthetic, celeb, or rel_position.")
 
     if not dataset_meta:
         raise ValueError(f"No datasets configured for task={task!r}, mode={mode!r}")
@@ -590,9 +603,9 @@ def _load_validation_dataset(task, mode, hf_dataset_path=None, num_samples=100):
 
     elif task == "ocr":
         assert hf_dataset_path is not None, "hf_dataset_path required for OCR validation"
-        ds = hf_load_dataset(hf_dataset_path, split="train")
+        ds = hf_load_dataset(hf_dataset_path, split="validation")
         n = min(num_samples, len(ds))
-        ds = ds.select(range(len(ds) - n, len(ds)))
+        ds = ds.select(range(n))
         return ds
 
     elif task == "ocr_synthetic":
@@ -603,6 +616,14 @@ def _load_validation_dataset(task, mode, hf_dataset_path=None, num_samples=100):
 
     elif task == "celeb":
         ds = hf_load_dataset("heez/celeb-recognition", split="test")
+        n = min(num_samples, len(ds))
+        ds = ds.select(range(n))
+        return ds
+
+    elif task == "rel_position":
+        if mode != 'und':
+            return None
+        ds = hf_load_dataset("heez/relative-position-new", split="validation")
         n = min(num_samples, len(ds))
         ds = ds.select(range(n))
         return ds
@@ -815,6 +836,14 @@ def calculate_metrics(predictions, references, loaded_metrics=None):
     return metrics
 
 
+def _extract_position_label(text):
+    """Return one quadrant label from text, or None when parsing is ambiguous."""
+    matches = re.findall(r"(top-left|top-right|bottom-left|bottom-right)", str(text).lower())
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 @torch.no_grad()
 def validate_understanding(
     model, tokenizer, new_token_ids, image_transform, val_ds, task, device, logger,
@@ -824,6 +853,7 @@ def validate_understanding(
     Uses Bagel.chat() for autoregressive inference, then computes:
     - counting: accuracy (exact match) and MAD (mean absolute deviation)
     - ocr / ocr_synthetic: exact-match accuracy and simple character error rate
+    - rel_position: parsed quadrant accuracy over top-left / top-right / bottom-left / bottom-right
     """
     from data.data_utils import pil_img2rgb
 
@@ -832,6 +862,7 @@ def validate_understanding(
     correct = 0
     total = 0
     mad_sum = 0.0
+    pos_parse_fail = 0
     predictions = []
     references = []
 
@@ -848,8 +879,8 @@ def validate_understanding(
                 answer_gt = str(item.get("answer_count") or item.get("answer"))
             elif task == "ocr":
                 image = pil_img2rgb(item["image"])
-                question = "Extract all text from the image."
-                answer_gt = item.get("text", item.get("answer", item.get("ground_truth", "")))
+                question = item.get("question") or "Extract all text from the image."
+                answer_gt = item.get("answer", item.get("text", item.get("ground_truth", "")))
             elif task == "ocr_synthetic":
                 from data.ocr_render import generate_image as generate_ocr_image
                 raw_text = item["text"]
@@ -861,6 +892,10 @@ def validate_understanding(
                 )
                 image = pil_img2rgb(image)
             elif task == "celeb":
+                image = pil_img2rgb(item["image"])
+                question = item.get("question", "")
+                answer_gt = str(item.get("answer", ""))
+            elif task == "rel_position":
                 image = pil_img2rgb(item["image"])
                 question = item.get("question", "")
                 answer_gt = str(item.get("answer", ""))
@@ -882,6 +917,13 @@ def validate_understanding(
                 mad_sum += abs(pred_num - gt_num)
             elif task == "celeb":
                 if pred.strip().lower() == answer_gt.strip().lower():
+                    correct += 1
+            elif task == "rel_position":
+                pred_pos = _extract_position_label(pred)
+                gt_pos = _extract_position_label(answer_gt)
+                if pred_pos is None or gt_pos is None:
+                    pos_parse_fail += 1
+                if pred_pos is not None and gt_pos is not None and pred_pos == gt_pos:
                     correct += 1
             else:
                 # OCR: exact match + collect for nltk metrics
@@ -907,6 +949,9 @@ def validate_understanding(
         metrics["val_accuracy"] = correct / total
         if task == "counting":
             metrics["val_mad"] = mad_sum / total
+        elif task == "rel_position":
+            metrics["val/pos_acc"] = metrics["val_accuracy"]
+            metrics["val/pos_parse_fail_rate"] = pos_parse_fail / total
         elif task in ("ocr", "ocr_synthetic") and predictions:
             loaded = {
                 "wer": evaluate.load("wer"),
@@ -918,6 +963,9 @@ def validate_understanding(
                 metrics[f"val/{k}"] = v
     else:
         metrics["val_accuracy"] = 0.0
+        if task == "rel_position":
+            metrics["val/pos_acc"] = 0.0
+            metrics["val/pos_parse_fail_rate"] = 0.0
 
     return metrics
 

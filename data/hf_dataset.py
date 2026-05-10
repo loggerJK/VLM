@@ -1,4 +1,4 @@
-"""HuggingFace dataset loaders for counting, OCR, and synthetic-OCR tasks.
+"""HuggingFace dataset loaders for counting, OCR, position, and related tasks.
 
 Each dataset class inherits from DistributedIterableDataset and yields samples
 in BAGEL's sequence_plan format (matching SftJSONLIterableDataset / T2IIterableDataset).
@@ -256,6 +256,102 @@ class HFCountingGenDataset(HFDatasetBase):
 
 
 # ---------------------------------------------------------------------------
+# Relative position dataset  (HF: heez/relative-position-new)
+# ---------------------------------------------------------------------------
+
+class HFRelPositionUndDataset(HFDatasetBase):
+    """Relative-position understanding: image + question -> answer (CE loss)."""
+
+    def __init__(
+        self,
+        dataset_name,
+        transform,
+        tokenizer,
+        data_dir_list=None,
+        num_used_data=None,
+        local_rank=0,
+        world_size=1,
+        num_workers=8,
+        data_status=None,
+        **kwargs,
+    ):
+        super().__init__(dataset_name, local_rank, world_size, num_workers)
+        self.transform = transform
+        self.tokenizer = tokenizer
+        self.data_status = data_status
+
+        if local_rank == 0:
+            print(f"[{dataset_name}] Loading HF dataset: heez/relative-position-new ...")
+        self.hf_dataset = load_dataset("heez/relative-position-new", split="train")
+        if local_rank == 0:
+            print(f"[{dataset_name}] Loaded {len(self.hf_dataset)} samples")
+
+        n = len(self.hf_dataset)
+        self.data_paths = list(range(n))
+        self.set_epoch()
+
+    def __iter__(self):
+        data_paths_per_worker, worker_id = self.get_data_paths_per_worker()
+        if data_paths_per_worker is None:
+            data_paths_per_worker = list(range(len(self.hf_dataset)))
+            worker_id = 0
+
+        if self.data_status is not None and worker_id in self.data_status:
+            row_start_id = self.data_status[worker_id] + 1
+        else:
+            row_start_id = 0
+
+        transform_stride = self.transform.stride
+        print(
+            f"rank-{self.local_rank} worker-{worker_id} dataset-{self.dataset_name}: "
+            f"resuming data at row#{row_start_id}"
+        )
+
+        while True:
+            indices = data_paths_per_worker[row_start_id:]
+            for pos, idx in enumerate(indices, start=row_start_id):
+                try:
+                    item = self.hf_dataset[idx]
+                    image = pil_img2rgb(item["image"])
+                    question = item.get("question", "")
+                    answer = str(item.get("answer", ""))
+                    if not question or not answer:
+                        continue
+
+                    image_tensor = self.transform(image)
+                    height, width = image_tensor.shape[1:]
+                    num_img_tokens = width * height // (transform_stride ** 2)
+
+                    question_ids = self.tokenizer.encode(question)
+                    answer_ids = self.tokenizer.encode(answer)
+                    num_tokens = len(question_ids) + num_img_tokens + len(answer_ids)
+
+                    sequence_plan = [
+                        {"type": "vit_image", "enable_cfg": 0, "loss": 0, "special_token_loss": 0, "special_token_label": None},
+                        {"type": "text", "enable_cfg": 0, "loss": 0, "special_token_loss": 0, "special_token_label": None},
+                        {"type": "text", "enable_cfg": 0, "loss": 1, "special_token_loss": 0, "special_token_label": None},
+                    ]
+
+                    yield dict(
+                        image_tensor_list=[image_tensor],
+                        text_ids_list=[question_ids, answer_ids],
+                        sequence_plan=sequence_plan,
+                        num_tokens=num_tokens,
+                        data_indexes={
+                            "data_indexes": pos,
+                            "worker_id": worker_id,
+                            "dataset_name": self.dataset_name,
+                        },
+                    )
+                except Exception:
+                    traceback.print_exc()
+                    continue
+
+            row_start_id = 0
+            print(f"{self.dataset_name} repeat in rank-{self.local_rank} worker-{worker_id}")
+
+
+# ---------------------------------------------------------------------------
 # OCR datasets  (user-specified HF dataset via hf_dataset_path)
 # ---------------------------------------------------------------------------
 
@@ -315,8 +411,8 @@ class HFOCRUndDataset(HFDatasetBase):
                 try:
                     item = self.hf_dataset[idx]
                     image = pil_img2rgb(item["image"])
-                    question = "Extract all text from the image."
-                    answer = item.get("text", item.get("answer", item.get("ground_truth", "")))
+                    question = item.get("question") or "Extract all text from the image."
+                    answer = item.get("answer", item.get("text", item.get("ground_truth", "")))
 
                     image_tensor = self.transform(image)
                     height, width = image_tensor.shape[1:]

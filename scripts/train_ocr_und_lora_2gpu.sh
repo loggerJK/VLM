@@ -7,7 +7,8 @@
 
 set -euo pipefail
 # source ./.env
-source /data/mm-llm-backbone_890/personal/sirius/audio_ablation/env.sh
+cd /data/mm-llm-backbone_890/personal/sirius/audio_ablation/audio_bagel
+source ./env.sh
 conda activate bagel
 
 # Using HF_HOME
@@ -18,15 +19,15 @@ echo "HF_MODULES_CACHE is set to: ${HF_MODULES_CACHE}"
 # ============================================================
 # Settings — edit here
 # ============================================================
-CUDA=0
+CUDA="0,1"
 MASTER_PORT=29601
 LR=2e-5
 TOTAL_STEPS=50000
-SAVE_EVERY=2000
-EXP_NAME=ocr_und_lora_1gpu
+SAVE_EVERY=100
+EXP_NAME=ocr_und_lora_2gpu
 HF_DATASET_PATH=Jiwon-Kang/OCR-Synthetic-Rendered-200K
-EFFECTIVE_BATCH=128
-NGPUS=1
+EFFECTIVE_BATCH=64
+NGPUS=$(echo $CUDA | awk -F',' '{print NF}')
 GRAD_ACCUM=$((EFFECTIVE_BATCH / NGPUS))
 
 # Resume (leave empty to train from scratch)
@@ -52,13 +53,14 @@ RESUME_ARGS=""
 [ -n "${WANDB_RUN_ID}" ]   && RESUME_ARGS="${RESUME_ARGS} --wandb_runid ${WANDB_RUN_ID} --wandb_resume must"
 
 echo "============================================================"
-echo " BAGEL — ocr und + LoRA (1 GPU)"
+echo " BAGEL — ocr und + LoRA (${NGPUS} GPUs)"
 echo "  CUDA=${CUDA}  LR=${LR}  Steps=${TOTAL_STEPS}"
+echo "  Effective Batch Size=${EFFECTIVE_BATCH} (Grad Accum Steps=${GRAD_ACCUM})"
 echo "  Ckpt: ${CHECKPOINT_DIR}"
 echo "============================================================"
 
 torchrun \
-    --nproc_per_node=1 \
+    --nproc_per_node=2 \
     --master_port=${MASTER_PORT} \
     ./train/pretrain_unified_navit.py \
     --model_path ./models/ \

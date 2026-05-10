@@ -2,7 +2,8 @@
 # OCR understanding — 2 GPU FULL_SHARD
 
 set -euo pipefail
-source ./.env
+source /data/mm-llm-backbone_890/personal/sirius/audio_ablation/env.sh
+conda activate bagel
 
 # ============================================================
 # Settings — edit here
@@ -13,7 +14,7 @@ LR=1e-4
 TOTAL_STEPS=50000
 SAVE_EVERY=2000
 EXP_NAME=ocr_und_2gpu
-HF_DATASET_PATH=naver-clova-ix/cord-v2
+HF_DATASET_PATH=Jiwon-Kang/OCR-Synthetic-Rendered-200K
 EFFECTIVE_BATCH=128
 NGPUS=2
 GRAD_ACCUM=$((EFFECTIVE_BATCH / NGPUS))
@@ -25,22 +26,22 @@ WANDB_RUN_ID=""
 # ============================================================
 export CUDA_VISIBLE_DEVICES=${CUDA}
 export PYTHONNOUSERSITE=1
-export PYTHONPATH=/mnt/data1/jiwon/bagel_train:${PYTHONPATH:-}
+export PYTHONPATH=$(pwd):${PYTHONPATH:-}
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
-RESULTS_DIR=/mnt/data1/jiwon/bagel_train/results/${EXP_NAME}
-CHECKPOINT_DIR=/mnt/data1/jiwon/bagel_train/checkpoints/${EXP_NAME}
+RESULTS_DIR=./results/${EXP_NAME}
+CHECKPOINT_DIR=./checkpoints/${EXP_NAME}
 mkdir -p "${RESULTS_DIR}" "${CHECKPOINT_DIR}"
 
 RESUME_ARGS=""
 [ -n "${RESUME_FROM}" ] && RESUME_ARGS="${RESUME_ARGS} --resume_from ${RESUME_FROM}"
 [ -n "${WANDB_RUN_ID}" ] && RESUME_ARGS="${RESUME_ARGS} --wandb_runid ${WANDB_RUN_ID} --wandb_resume must"
 
-/home/cvlab22/anaconda3/envs/bagel/bin/torchrun \
+torchrun \
     --nproc_per_node=2 \
     --master_port=${MASTER_PORT} \
-    /mnt/data1/jiwon/bagel_train/train/pretrain_unified_navit.py \
-    --model_path /mnt/data1/jiwon/BAGEL/models/BAGEL-7B-MoT \
+    ./train/pretrain_unified_navit.py \
+    --model_path ./models/ \
     --finetune_from_hf True \
     --layer_module Qwen2MoTDecoderLayer \
     --use_flex True \
