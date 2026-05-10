@@ -59,6 +59,7 @@ from accelerate.utils import DistributedType, InitProcessGroupKwargs, set_seed
 
 from training.utils import get_config, flatten_omega_conf
 from parquet import RelPositionGenDataset
+from training.train_mmada_rel_position import validate_rel_position
 
 from models import MAGVITv2, get_mask_schedule, MMadaModelLM, MMadaConfig
 from training.prompting_utils import UniversalPrompting
@@ -367,14 +368,20 @@ def main():
     # Pre-load validation data (once, every rank holds full list, stride sharded inside validate_*)
     # ------------------------------------------------------------------
     val_gen_items = []
-    logger.info("Pre-loading rel-position-gen validation data (validation split)...")
+    val_und_items = []
+    logger.info("Pre-loading rel-position validation data (validation split)...")
     try:
         from datasets import load_dataset as hf_load_dataset
         val_ds = hf_load_dataset("heez/relative-position-new", split="validation")
-        max_val = config.experiment.get("max_val_rel_position_gen_samples", 16)
-        n = min(max_val, len(val_ds))
-        val_gen_items = [val_ds[i] for i in range(n)]
-        logger.info(f"Loaded {len(val_gen_items)} validation samples.")
+        max_val_gen = config.experiment.get("max_val_rel_position_gen_samples", 16)
+        max_val_und = config.experiment.get("max_val_rel_position_und_samples", 100)
+        n_gen = min(max_val_gen, len(val_ds))
+        n_und = min(max_val_und, len(val_ds))
+        val_gen_items = [val_ds[i] for i in range(n_gen)]
+        val_und_items = [val_ds[i] for i in range(n_und)]
+        logger.info(
+            f"Loaded validation samples: gen={len(val_gen_items)}, und={len(val_und_items)}."
+        )
     except Exception as e:
         logger.warning(f"Could not load validation split: {e}")
 
@@ -445,6 +452,10 @@ def main():
         validate_rel_position_gen(
             model, vq_model, uni_prompting, accelerator, config,
             global_step, val_gen_items, mask_schedule,
+        )
+        validate_rel_position(
+            model, vq_model, uni_prompting, accelerator, config,
+            global_step, val_und_items,
         )
         accelerator.wait_for_everyone()
 
@@ -584,6 +595,10 @@ def main():
                     validate_rel_position_gen(
                         model, vq_model, uni_prompting, accelerator, config,
                         global_step + 1, val_gen_items, mask_schedule,
+                    )
+                    validate_rel_position(
+                        model, vq_model, uni_prompting, accelerator, config,
+                        global_step + 1, val_und_items,
                     )
 
                 accelerator.wait_for_everyone()

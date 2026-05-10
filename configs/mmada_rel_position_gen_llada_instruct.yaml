@@ -14,6 +14,7 @@ experiment:
     log_grad_norm_every: 100
     resume_from_checkpoint: "latest"
     max_val_rel_position_gen_samples: 16
+    max_val_rel_position_und_samples: 100
     validate_before_train: False  # True 면 훈련 시작 전 validation split wandb 로깅 1회 수행
 
 model:

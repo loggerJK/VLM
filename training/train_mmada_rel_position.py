@@ -90,6 +90,12 @@ def extract_position(text: str):
     return matches[0] if matches else None
 
 
+def _pil_to_png_bytes(pil_image: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def get_vq_model_class(model_type):
     if model_type == "magvitv2":
         return MAGVITv2
@@ -935,7 +941,7 @@ def validate_rel_position(
                 "gt_position": gt_position,
                 "pred_position": pred_position,
                 "pred_answer": generated_text,
-                "image": pil_image,
+                "image_bytes": _pil_to_png_bytes(pil_image),
             })
 
             if len(local_results) == 1:
@@ -990,7 +996,10 @@ def validate_rel_position(
     pred_positions = [item["pred_position"] for item in results]
     pred_answers = [item["pred_answer"] for item in results]
     questions = [item["question"] for item in results]
-    sample_images = [item["image"] for item in results]
+    sample_images = [
+        Image.open(io.BytesIO(item["image_bytes"])).convert("RGB")
+        for item in results
+    ]
 
     total = len(gt_positions)
     correct = sum(1 for g, p in zip(gt_positions, pred_positions) if g == p and p is not None)

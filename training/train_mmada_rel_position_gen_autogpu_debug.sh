@@ -25,6 +25,8 @@ MAX_TRAIN_STEPS=${MAX_TRAIN_STEPS:-10}
 EVAL_EVERY=${EVAL_EVERY:-5}
 SAVE_EVERY=${SAVE_EVERY:-10}
 MAX_VAL_REL_POSITION_GEN_SAMPLES=${MAX_VAL_REL_POSITION_GEN_SAMPLES:-4}
+MAX_VAL_REL_POSITION_UND_SAMPLES=${MAX_VAL_REL_POSITION_UND_SAMPLES:-4}
+VALIDATE_BEFORE_TRAIN=${VALIDATE_BEFORE_TRAIN:-True}
 OUTPUT_DIR=${OUTPUT_DIR:-}
 LEARNING_RATE=${LEARNING_RATE:-}
 NGPUS=${NUM_PROCESSES}
@@ -50,6 +52,8 @@ echo "  MAX_TRAIN_STEPS            : ${MAX_TRAIN_STEPS}"
 echo "  EVAL_EVERY                 : ${EVAL_EVERY}"
 echo "  SAVE_EVERY                 : ${SAVE_EVERY}"
 echo "  MAX_VAL_RELPOS_GEN_SAMP.  : ${MAX_VAL_REL_POSITION_GEN_SAMPLES}"
+echo "  MAX_VAL_RELPOS_UND_SAMP.  : ${MAX_VAL_REL_POSITION_UND_SAMPLES}"
+echo "  VALIDATE_FIRST            : ${VALIDATE_BEFORE_TRAIN}"
 echo "  EFFECTIVE_BATCH_SIZE       : ${EFFECTIVE_BATCH_SIZE}"
 echo "  TRAIN_BATCH_SIZE (per-GPU) : ${TRAIN_BATCH_SIZE}"
 echo "  GRAD_ACCUM_STEPS           : ${GRAD_ACCUM_STEPS}"
@@ -71,6 +75,7 @@ accelerate launch --config_file "${ACCEL_CONFIG}" \
     experiment.save_every=${SAVE_EVERY} \
     experiment.eval_every=${EVAL_EVERY} \
     experiment.max_val_rel_position_gen_samples=${MAX_VAL_REL_POSITION_GEN_SAMPLES} \
-    experiment.validate_before_train=True \
+    experiment.max_val_rel_position_und_samples=${MAX_VAL_REL_POSITION_UND_SAMPLES} \
+    experiment.validate_before_train=${VALIDATE_BEFORE_TRAIN} \
     training.max_train_steps=${MAX_TRAIN_STEPS} \
     "${OVERRIDES[@]}"
